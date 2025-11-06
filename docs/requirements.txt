@@ -1,0 +1,54 @@
+# Documentation Build Dependencies
+# ================================
+# This file specifies exact versions for building LangChain integration documentation.
+# All versions verified from libs/*/pyproject.toml and uv.lock for Python 3.10-3.13 compatibility.
+# Reference: Agent Action Plan section 0.6.1
+
+# Core Documentation Tools
+# ------------------------
+# Static site generator with Python 3.10+ support and critical bug fixes
+mkdocs==1.5.3
+
+# Material Design theme with modern UI features and mkdocs 1.5.x compatibility
+mkdocs-material==9.4.8
+
+# API documentation generation from Python docstrings with Python 3.13 and Pydantic v2 support
+mkdocstrings[python]==0.24.0
+
+# Python handler for mkdocstrings with enhanced type hint rendering
+mkdocstrings-python==1.7.5
+
+# Markdown extensions for Mermaid diagrams and enhanced code block syntax
+pymdown-extensions==10.5
+
+# Type Checking and Code Quality
+# -------------------------------
+# Static type checker - version matches libs/core/pyproject.toml dependency-groups.typing
+mypy==1.18.2
+
+# Fast Python linter and formatter supporting Python 3.13
+ruff==0.14.3
+
+# Testing Framework
+# -----------------
+# Testing framework for validating executable example code - matches libs/core/pyproject.toml
+pytest==8.4.2
+
+# Pytest plugin for testing async example code and patterns
+pytest-asyncio==1.2.0
+
+# Documentation Build Optimization
+# ---------------------------------
+# Minify HTML, CSS, and JavaScript in generated documentation site
+mkdocs-minify-plugin==0.7.1
+
+# Handle URL redirects for restructured documentation pages
+mkdocs-redirects==1.2.1
+
+# Include markdown files within other markdown files for DRY documentation
+markdown-include==0.8.1
+
+# Link Validation
+# ---------------
+# Validate all internal and external links in generated documentation
+linkchecker==10.4.0
