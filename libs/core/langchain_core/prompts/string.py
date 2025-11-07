@@ -30,6 +30,9 @@ PromptTemplateFormat = Literal["f-string", "mustache", "jinja2"]
 def jinja2_formatter(template: str, /, **kwargs: Any) -> str:
     """Format a template using jinja2.
 
+    This function uses Jinja2's templating engine to render templates with variables.
+    Jinja2 supports advanced features like loops, conditionals, filters, and more.
+
     *Security warning*:
         As of LangChain 0.0.329, this method uses Jinja2's
         SandboxedEnvironment by default. However, this sand-boxing should
@@ -37,17 +40,42 @@ def jinja2_formatter(template: str, /, **kwargs: Any) -> str:
         Do not accept jinja2 templates from untrusted sources as they may lead
         to arbitrary Python code execution.
 
+        **CRITICAL**: Never use jinja2 templates with user-controlled or unverified
+        inputs. Even with sandboxing, malicious templates can potentially execute
+        arbitrary Python code. Always validate and sanitize template sources.
+
         https://jinja.palletsprojects.com/en/3.1.x/sandbox/
 
     Args:
-        template: The template string.
+        template: The template string with Jinja2 syntax (e.g., "Hello {{ name }}!").
         **kwargs: The variables to format the template with.
 
     Returns:
-        The formatted string.
+        The formatted string with all template variables replaced.
 
     Raises:
         ImportError: If jinja2 is not installed.
+        jinja2.TemplateSyntaxError: If the template contains invalid Jinja2 syntax.
+        jinja2.UndefinedError: If a required template variable is missing from kwargs.
+
+    Example:
+        Basic variable substitution:
+        >>> jinja2_formatter("Hello {{ name }}!", name="World")
+        'Hello World!'
+
+        Using filters:
+        >>> jinja2_formatter("{{ name|upper }}", name="world")
+        'WORLD'
+
+        Using conditionals:
+        >>> jinja2_formatter("{% if admin %}Admin{% else %}User{% endif %}", admin=True)
+        'Admin'
+
+        Using loops:
+        >>> jinja2_formatter("{% for item in items %}{{ item }},{% endfor %}", items=["a", "b"])
+        'a,b,'
+
+    Source: libs/core/langchain_core/prompts/string.py:30
     """
     if not _HAS_JINJA2:
         msg = (
@@ -109,12 +137,37 @@ def _get_jinja2_variables_from_template(template: str) -> set[str]:
 def mustache_formatter(template: str, /, **kwargs: Any) -> str:
     """Format a template using mustache.
 
+    Mustache is a logic-less templating system that uses double curly braces {{}}
+    for variable substitution. It supports simple variables, sections (loops),
+    inverted sections, and nested object access using dot notation.
+
     Args:
-        template: The template string.
-        **kwargs: The variables to format the template with.
+        template: The template string with Mustache syntax (e.g., "Hello {{name}}!").
+        **kwargs: The variables to format the template with. Supports nested dicts
+            for dot notation access (e.g., {{person.name}}).
 
     Returns:
-        The formatted string.
+        The formatted string with all template variables replaced.
+
+    Example:
+        Basic variable substitution:
+        >>> mustache_formatter("Hello {{name}}!", name="World")
+        'Hello World!'
+
+        Nested object access:
+        >>> mustache_formatter("{{person.name}} is {{person.age}}", 
+        ...                    person={"name": "Alice", "age": 30})
+        'Alice is 30'
+
+        Sections (loops over lists):
+        >>> mustache_formatter("{{#items}}{{.}},{{/items}}", items=["a", "b", "c"])
+        'a,b,c,'
+
+        Inverted sections (render if false/empty):
+        >>> mustache_formatter("{{^items}}No items{{/items}}", items=[])
+        'No items'
+
+    Source: libs/core/langchain_core/prompts/string.py:109
     """
     return mustache.render(template, kwargs)
 
@@ -153,13 +206,66 @@ Defs = dict[str, "Defs"]
 
 
 def mustache_schema(template: str) -> type[BaseModel]:
-    """Get the variables from a mustache template.
+    """Get the variables from a mustache template as a Pydantic model.
+
+    This function analyzes a Mustache template and automatically generates a Pydantic
+    model class that represents the expected input structure. It parses the template
+    to identify variables, sections, and nested structures, then creates a typed
+    model with the appropriate hierarchy.
+
+    The generated model can be used for:
+    - Type validation of template inputs
+    - Auto-generating input schemas for prompts
+    - Documentation of expected template structure
+    - IDE autocompletion when building template inputs
+
+    Template parsing rules:
+    - Simple variables {{name}} become string fields
+    - Sections {{#person}}...{{/person}} become nested model fields
+    - Nested variables {{person.name}} create hierarchical models
+    - Inverted sections {{^items}}...{{/items}} are treated like regular sections
 
     Args:
-        template: The template string.
+        template: The Mustache template string to analyze. Should contain valid
+            Mustache syntax with {{variable}}, {{#section}}...{{/section}}, and/or
+            {{^inverted}}...{{/inverted}} blocks.
 
     Returns:
-        The variables from the template as a Pydantic model.
+        A dynamically created Pydantic BaseModel subclass (named "PromptInput") that
+        represents the template's input structure. The model's fields correspond to
+        the template's variables:
+        - Top-level variables become direct fields
+        - Sections become nested model fields
+        - Nested variables (dot notation) create model hierarchies
+
+    Example:
+        Simple variables:
+        >>> schema = mustache_schema("Hello {{name}}!")
+        >>> schema.__fields__.keys()
+        dict_keys(['name'])
+
+        Nested variables:
+        >>> schema = mustache_schema("{{person.name}} is {{person.age}}")
+        >>> hasattr(schema.__fields__['person'].annotation, '__fields__')
+        True
+
+        Sections:
+        >>> schema = mustache_schema("{{#users}}{{name}}{{/users}}")
+        >>> 'users' in schema.__fields__
+        True
+
+        Complex nested structure:
+        >>> template = "{{#company}}{{name}} - {{#employees}}{{firstName}}{{/employees}}{{/company}}"
+        >>> schema = mustache_schema(template)
+        >>> 'company' in schema.__fields__
+        True
+
+    Note:
+        The generated model uses None as default for all fields, making them optional.
+        Leaf nodes (simple variables) are typed as str, while nested structures are
+        typed as nested Pydantic models.
+
+    Source: libs/core/langchain_core/prompts/string.py:207
     """
     fields = {}
     prefix: tuple[str, ...] = ()
@@ -206,11 +312,52 @@ DEFAULT_FORMATTER_MAPPING: dict[str, Callable] = {
     "mustache": mustache_formatter,
     "jinja2": jinja2_formatter,
 }
+"""Default mapping of template format names to formatting functions.
+
+This dictionary maps template format identifiers to their corresponding formatting
+functions. It is used by prompt templates to render templates based on the specified
+format type.
+
+Supported formats:
+    - "f-string": Python f-string style formatting using {variable} syntax.
+      Uses the standard formatter.format function.
+    - "mustache": Mustache templating using {{variable}} syntax with support for
+      sections and nested objects. Uses mustache_formatter function.
+    - "jinja2": Jinja2 templating with advanced features like filters, loops, and
+      conditionals using {{ variable }} syntax. Uses jinja2_formatter function.
+
+Usage:
+    formatter_func = DEFAULT_FORMATTER_MAPPING["f-string"]
+    result = formatter_func("Hello {name}", name="World")
+
+Source: libs/core/langchain_core/prompts/string.py:204
+"""
 
 DEFAULT_VALIDATOR_MAPPING: dict[str, Callable] = {
     "f-string": formatter.validate_input_variables,
     "jinja2": validate_jinja2,
 }
+"""Default mapping of template format names to validation functions.
+
+This dictionary maps template format identifiers to their corresponding validation
+functions. Validators check that the provided input variables match the template's
+requirements before formatting.
+
+Supported validators:
+    - "f-string": Validates that all placeholder variables in the f-string template
+      are provided in input_variables. Uses formatter.validate_input_variables.
+    - "jinja2": Validates Jinja2 template variables and issues warnings for missing
+      or extra variables. Uses validate_jinja2 function.
+
+Note: Mustache format does not have a validator in this mapping as it handles
+missing variables gracefully by rendering them as empty strings.
+
+Usage:
+    validator_func = DEFAULT_VALIDATOR_MAPPING["f-string"]
+    validator_func(template="Hello {name}", input_variables=["name"])
+
+Source: libs/core/langchain_core/prompts/string.py:229
+"""
 
 
 def check_valid_template(
@@ -218,14 +365,53 @@ def check_valid_template(
 ) -> None:
     """Check that template string is valid.
 
+    This function validates that a template string conforms to the specified format
+    and that all required input variables are properly defined. It performs two levels
+    of validation:
+    
+    1. Format validation: Ensures the template_format is supported
+    2. Variable validation: Ensures input_variables match template requirements
+
     Args:
-        template: The template string.
-        template_format: The template format. Should be one of "f-string" or "jinja2".
-        input_variables: The input variables.
+        template: The template string to validate. Format depends on template_format.
+        template_format: The template format. Should be one of "f-string", "jinja2",
+            or "mustache". Note that only "f-string" and "jinja2" have validators;
+            mustache templates are not validated by this function.
+        input_variables: List of variable names that will be provided when formatting
+            the template. Must match the variables referenced in the template.
 
     Raises:
-        ValueError: If the template format is not supported.
-        ValueError: If the prompt schema is invalid.
+        ValueError: If the template_format is not one of the supported formats in
+            DEFAULT_VALIDATOR_MAPPING. Error message includes the list of valid formats.
+        ValueError: If the template contains variable mismatches. This can occur when:
+            - Required template variables are missing from input_variables
+            - Template references undefined variables
+            - Variable names in template don't match input_variables
+            The error message will indicate "Invalid prompt schema" and suggest checking
+            for mismatched or missing input parameters.
+        KeyError: Indirectly raised and caught when template variable lookup fails
+            during validation. Converted to ValueError with descriptive message.
+        IndexError: Indirectly raised and caught when template parsing encounters
+            structural errors. Converted to ValueError with descriptive message.
+
+    Example:
+        Valid f-string template:
+        >>> check_valid_template("Hello {name}!", "f-string", ["name"])
+        # No exception raised
+
+        Invalid - missing variable:
+        >>> check_valid_template("Hello {name}!", "f-string", [])
+        # Raises ValueError: Invalid prompt schema; check for mismatched or missing...
+
+        Invalid format:
+        >>> check_valid_template("Hello {{name}}", "invalid", ["name"])
+        # Raises ValueError: Invalid template format 'invalid'...
+
+        Valid jinja2 template:
+        >>> check_valid_template("Hello {{ name }}!", "jinja2", ["name"])
+        # No exception raised (may issue warning if variables mismatch)
+
+    Source: libs/core/langchain_core/prompts/string.py:268
     """
     try:
         validator_func = DEFAULT_VALIDATOR_MAPPING[template_format]
@@ -248,15 +434,61 @@ def check_valid_template(
 def get_template_variables(template: str, template_format: str) -> list[str]:
     """Get the variables from the template.
 
+    This function extracts all variable names from a template string based on the
+    specified format. It parses the template and identifies placeholders that need
+    to be filled when the template is rendered. The extraction method varies by format:
+
+    - **f-string**: Uses Python's string.Formatter to parse {variable} placeholders
+    - **jinja2**: Uses Jinja2's AST parser to find {{ variable }} references and
+      undeclared variables
+    - **mustache**: Uses mustache tokenizer to find {{variable}} placeholders,
+      returning only top-level keys for nested variables (e.g., "person" from
+      "{{person.name}}")
+
     Args:
-        template: The template string.
-        template_format: The template format. Should be one of "f-string" or "jinja2".
+        template: The template string to analyze. The expected syntax depends on
+            template_format (e.g., "{name}" for f-string, "{{ name }}" for jinja2,
+            "{{name}}" for mustache).
+        template_format: The template format identifier. Must be one of:
+            - "f-string": Python f-string style with {variable} syntax
+            - "jinja2": Jinja2 template style with {{ variable }} syntax
+            - "mustache": Mustache template style with {{variable}} syntax
 
     Returns:
-        The variables from the template.
+        A sorted list of unique variable names found in the template. Variables are
+        returned in alphabetical order for consistency. For mustache templates with
+        nested variables like {{person.name}}, only the top-level key ("person") is
+        returned.
 
     Raises:
-        ValueError: If the template format is not supported.
+        ValueError: If template_format is not one of the supported formats
+            ("f-string", "jinja2", "mustache"). Error message includes the
+            unsupported format name.
+        ImportError: If template_format is "jinja2" but jinja2 package is not
+            installed. Raised by _get_jinja2_variables_from_template.
+
+    Example:
+        Extract variables from f-string template:
+        >>> get_template_variables("Hello {name}, you are {age} years old", "f-string")
+        ['age', 'name']
+
+        Extract variables from jinja2 template:
+        >>> get_template_variables("Hello {{ name }}!", "jinja2")
+        ['name']
+
+        Extract variables from mustache template:
+        >>> get_template_variables("Hello {{name}}!", "mustache")
+        ['name']
+
+        Nested mustache variables return only top-level key:
+        >>> get_template_variables("{{person.name}} is {{person.age}}", "mustache")
+        ['person']
+
+        Multiple variables are sorted alphabetically:
+        >>> get_template_variables("{zebra} {apple} {banana}", "f-string")
+        ['apple', 'banana', 'zebra']
+
+    Source: libs/core/langchain_core/prompts/string.py:301
     """
     if template_format == "jinja2":
         # Get the variables for the template
@@ -275,7 +507,52 @@ def get_template_variables(template: str, template_format: str) -> list[str]:
 
 
 class StringPromptTemplate(BasePromptTemplate, ABC):
-    """String prompt that exposes the format method, returning a prompt."""
+    """Base class for all string-based prompt templates.
+
+    StringPromptTemplate serves as the foundation for prompt templates that produce
+    string outputs. It extends BasePromptTemplate with string-specific formatting
+    capabilities and provides both synchronous and asynchronous formatting methods.
+
+    This class is abstract and should be subclassed to implement specific prompt
+    template types. Subclasses must implement the abstract methods from
+    BasePromptTemplate, particularly the format() method which defines how the
+    template is rendered into a string.
+
+    Key features:
+    - Converts formatted strings into StringPromptValue objects for LLM consumption
+    - Supports both sync (format) and async (aformat) formatting workflows
+    - Provides pretty printing capabilities for debugging and visualization
+    - Maintains compatibility with LangChain's Runnable interface for LCEL chains
+
+    Common subclasses:
+    - PromptTemplate: Simple f-string or Jinja2 based templates
+    - FewShotPromptTemplate: Templates with example-based few-shot learning
+    - Custom templates: User-defined templates with specialized formatting logic
+
+    Attributes:
+        input_variables: List of variable names required by the template (inherited)
+        partial_variables: Pre-filled variables that don't need to be provided each
+            time (inherited)
+
+    Methods:
+        format_prompt(**kwargs): Format the template and return a StringPromptValue
+        aformat_prompt(**kwargs): Async version of format_prompt
+        pretty_repr(html=False): Get a visual representation with variable placeholders
+        pretty_print(): Print the template with highlighted variables
+
+    Example:
+        Creating a custom StringPromptTemplate subclass:
+        >>> from langchain_core.prompts.string import StringPromptTemplate
+        >>> class CustomPrompt(StringPromptTemplate):
+        ...     def format(self, **kwargs) -> str:
+        ...         return f"Custom: {kwargs.get('text', '')}"
+        ...
+        >>> prompt = CustomPrompt(input_variables=["text"])
+        >>> prompt.format_prompt(text="Hello")
+        StringPromptValue(text='Custom: Hello')
+
+    Source: libs/core/langchain_core/prompts/string.py:329
+    """
 
     @classmethod
     def get_lc_namespace(cls) -> list[str]:

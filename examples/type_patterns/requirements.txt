@@ -1,0 +1,59 @@
+# Type Patterns Examples - Required Dependencies
+#
+# Purpose: Required dependencies for type_patterns examples demonstrating 
+#          type-safe LangChain usage with complete type annotations.
+#
+# Installation:
+#   pip install -r requirements.txt
+#   or
+#   uv pip install -r requirements.txt
+#
+# Python Version Requirement: >=3.10,<4.0.0
+#
+# Note: mypy is included for validating type annotations. Run the following
+#       to verify type correctness:
+#       mypy --strict <example_file>.py
+
+# ============================================================================
+# Core LangChain Dependencies
+# ============================================================================
+
+# langchain-core: Core LangChain abstractions including Runnable protocol,
+# Message types, and LCEL (LangChain Expression Language) composition operators
+langchain-core>=1.0.1,<2.0.0
+
+# langchain-classic: Classic chain implementations for compatibility examples
+# and traditional chain patterns
+langchain-classic>=1.0.0,<2.0.0
+
+# ============================================================================
+# LLM Provider Integrations
+# ============================================================================
+
+# langchain-openai: OpenAI LLM and chat model integration for type examples
+# Provides ChatOpenAI, OpenAI classes with full type annotations
+langchain-openai>=0.3.35
+
+# ============================================================================
+# Utilities and Configuration
+# ============================================================================
+
+# pydantic: Data validation and type checking - critical for type examples
+# Used for structured input/output with Pydantic models in chains
+pydantic>=2.12.3,<3.0.0
+
+# python-dotenv: Environment variable loading from .env files
+# Enables secure API key management in examples
+python-dotenv>=1.0.0,<2.0.0
+
+# typing-extensions: Backport of typing features for Python <3.13 compatibility
+# Provides TypedDict, Literal, Protocol, and other advanced typing features
+typing-extensions>=4.15.0,<5.0.0
+
+# ============================================================================
+# Type Checking Tools
+# ============================================================================
+
+# mypy: Static type checker for validation of type annotations
+# All examples should pass mypy --strict validation per documentation standards
+mypy>=1.18.2,<1.19.0

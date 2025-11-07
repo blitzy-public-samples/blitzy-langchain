@@ -53,7 +53,47 @@ logger = logging.getLogger(__name__)
 
 
 class BaseSingleActionAgent(BaseModel):
-    """Base Single Action Agent class."""
+    """Base Single Action Agent class.
+    
+    Abstract base for agents that return a single action per planning step.
+    Subclasses must implement plan(), aplan(), and input_keys property to define
+    agent behavior.
+    
+    **Usage:**
+    Extend this class to create custom single-action agents. The agent is called
+    repeatedly by AgentExecutor until it returns AgentFinish instead of AgentAction.
+    
+    **Subclass Requirements:**
+    - Implement plan(): Synchronous method returning AgentAction or AgentFinish
+    - Implement aplan(): Async version of plan()
+    - Implement input_keys property: List of required input key names
+    
+    **Single Action vs Multi Action:**
+    BaseSingleActionAgent returns one AgentAction per iteration, suitable for
+    sequential tool execution. For parallel tool execution, use BaseMultiActionAgent.
+    
+    Example:
+        ```python
+        from langchain_core.agents import AgentAction, AgentFinish
+        from langchain_classic.agents.agent import BaseSingleActionAgent
+        
+        class CustomAgent(BaseSingleActionAgent):
+            @property
+            def input_keys(self) -> list[str]:
+                return ["input"]
+            
+            def plan(self, intermediate_steps, callbacks=None, **kwargs):
+                # Custom planning logic
+                if len(intermediate_steps) >= 3:
+                    return AgentFinish({"output": "Done"}, "")
+                return AgentAction("search", "query", "Searching...")
+            
+            async def aplan(self, intermediate_steps, callbacks=None, **kwargs):
+                return self.plan(intermediate_steps, callbacks, **kwargs)
+        ```
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:55
+    """
 
     @property
     def return_values(self) -> list[str]:
@@ -222,7 +262,54 @@ class BaseSingleActionAgent(BaseModel):
 
 
 class BaseMultiActionAgent(BaseModel):
-    """Base Multi Action Agent class."""
+    """Base Multi Action Agent class.
+    
+    Abstract base for agents that can return multiple actions per planning step,
+    enabling parallel tool execution. Subclasses must implement plan(), aplan(),
+    and input_keys property.
+    
+    **Difference from BaseSingleActionAgent:**
+    While BaseSingleActionAgent returns one AgentAction per iteration,
+    BaseMultiActionAgent returns list[AgentAction], allowing the executor to
+    run multiple tools in parallel for efficiency.
+    
+    **Use Case:**
+    Appropriate for scenarios where multiple independent tools can be executed
+    simultaneously, such as:
+    - Gathering data from multiple sources concurrently
+    - Running multiple validation checks in parallel
+    - Executing complementary research queries together
+    
+    **Subclass Requirements:**
+    - Implement plan(): Return list[AgentAction] | AgentFinish
+    - Implement aplan(): Async version of plan()
+    - Implement input_keys property: List of required input key names
+    
+    Example:
+        ```python
+        from langchain_core.agents import AgentAction, AgentFinish
+        from langchain_classic.agents.agent import BaseMultiActionAgent
+        
+        class ParallelSearchAgent(BaseMultiActionAgent):
+            @property
+            def input_keys(self) -> list[str]:
+                return ["query"]
+            
+            def plan(self, intermediate_steps, callbacks=None, **kwargs):
+                if intermediate_steps:
+                    return AgentFinish({"output": "Complete"}, "")
+                # Return multiple actions for parallel execution
+                return [
+                    AgentAction("web_search", kwargs["query"], "Searching web"),
+                    AgentAction("wiki_search", kwargs["query"], "Searching wiki")
+                ]
+            
+            async def aplan(self, intermediate_steps, callbacks=None, **kwargs):
+                return self.plan(intermediate_steps, callbacks, **kwargs)
+        ```
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:224
+    """
 
     @property
     def return_values(self) -> list[str]:
@@ -393,7 +480,58 @@ class MultiActionAgentOutputParser(
 
 
 class RunnableAgent(BaseSingleActionAgent):
-    """Agent powered by Runnables."""
+    """Agent powered by Runnables.
+    
+    Adapter wrapping a Runnable as BaseSingleActionAgent, enabling LCEL-based
+    agent construction. The wrapped Runnable must accept dict input and return
+    AgentAction or AgentFinish.
+    
+    **Runnable Contract:**
+    The wrapped Runnable must:
+    - Accept dict input with 'intermediate_steps' key plus any agent-specific keys
+    - Return AgentAction (continue execution) or AgentFinish (complete)
+    - Handle the agent reasoning logic internally
+    
+    **Streaming Behavior:**
+    The stream_runnable parameter controls LLM invocation mode:
+    - True (default): Invokes via .stream() for token-level access in stream_log
+    - False: Invokes via .invoke() without token streaming
+    
+    When streaming is enabled, the agent accumulates chunks into final output,
+    making individual LLM tokens available through AgentExecutor.stream_log().
+    
+    Args:
+        runnable: Runnable that implements agent planning logic. Input dict must
+            contain 'intermediate_steps' key. Output must be AgentAction or
+            AgentFinish.
+        input_keys_arg: List of input keys required by agent (excluding
+            'intermediate_steps').
+        return_keys_arg: List of keys in final output dict.
+        stream_runnable: Whether to invoke runnable with .stream() (True) or
+            .invoke() (False). Streaming enables token access but may be slower.
+    
+    Example:
+        ```python
+        from langchain_core.agents import AgentAction, AgentFinish
+        from langchain_core.runnables import RunnableLambda
+        from langchain_classic.agents import RunnableAgent, AgentExecutor
+        
+        def agent_logic(inputs: dict) -> AgentAction | AgentFinish:
+            if len(inputs.get("intermediate_steps", [])) >= 2:
+                return AgentFinish({"output": "Done"}, "")
+            return AgentAction("search", inputs["input"], "Searching")
+        
+        runnable = RunnableLambda(agent_logic)
+        agent = RunnableAgent(
+            runnable=runnable,
+            input_keys_arg=["input"],
+            stream_runnable=False
+        )
+        executor = AgentExecutor(agent=agent, tools=tools)
+        ```
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:395
+    """
 
     runnable: Runnable[dict, AgentAction | AgentFinish]
     """Runnable to call to get agent action."""
@@ -501,7 +639,61 @@ class RunnableAgent(BaseSingleActionAgent):
 
 
 class RunnableMultiActionAgent(BaseMultiActionAgent):
-    """Agent powered by Runnables."""
+    """Agent powered by Runnables for multi-action scenarios.
+    
+    Adapter wrapping a Runnable as BaseMultiActionAgent, enabling LCEL-based
+    agent construction with parallel action support. The wrapped Runnable must
+    accept dict input and return list[AgentAction] or AgentFinish.
+    
+    **Runnable Contract:**
+    The wrapped Runnable must:
+    - Accept dict input with 'intermediate_steps' key plus any agent-specific keys
+    - Return list[AgentAction] (execute multiple tools) or AgentFinish (complete)
+    - Handle multi-action agent reasoning logic internally
+    
+    **Difference from RunnableAgent:**
+    While RunnableAgent returns single AgentAction per iteration,
+    RunnableMultiActionAgent returns list[AgentAction], enabling AgentExecutor
+    to execute multiple tools in parallel for improved efficiency.
+    
+    **Streaming Behavior:**
+    Same as RunnableAgent - stream_runnable parameter controls whether to use
+    .stream() (True, token access) or .invoke() (False, faster) for LLM calls.
+    
+    Args:
+        runnable: Runnable implementing multi-action planning logic. Input dict
+            must contain 'intermediate_steps'. Output must be list[AgentAction]
+            or AgentFinish.
+        input_keys_arg: List of input keys required by agent (excluding
+            'intermediate_steps').
+        return_keys_arg: List of keys in final output dict.
+        stream_runnable: Whether to invoke runnable with .stream() (True) or
+            .invoke() (False). Streaming enables token access through stream_log.
+    
+    Example:
+        ```python
+        from langchain_core.agents import AgentAction, AgentFinish
+        from langchain_core.runnables import RunnableLambda
+        from langchain_classic.agents import RunnableMultiActionAgent
+        
+        def parallel_agent_logic(inputs: dict):
+            if inputs.get("intermediate_steps"):
+                return AgentFinish({"output": "Complete"}, "")
+            # Return multiple actions for parallel execution
+            return [
+                AgentAction("search_web", inputs["query"], "Web search"),
+                AgentAction("search_docs", inputs["query"], "Doc search")
+            ]
+        
+        runnable = RunnableLambda(parallel_agent_logic)
+        agent = RunnableMultiActionAgent(
+            runnable=runnable,
+            input_keys_arg=["query"]
+        )
+        ```
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:503
+    """
 
     runnable: Runnable[dict, list[AgentAction] | AgentFinish]
     """Runnable to call to get agent actions."""
@@ -708,11 +900,46 @@ class LLMSingleActionAgent(BaseSingleActionAgent):
     removal="1.0",
 )
 class Agent(BaseSingleActionAgent):
-    """Agent that calls the language model and deciding the action.
-
-    This is driven by a LLMChain. The prompt in the LLMChain MUST include
-    a variable called "agent_scratchpad" where the agent can put its
-    intermediary work.
+    """Legacy agent that calls the language model and decides the action.
+    
+    **DEPRECATED:** This class is deprecated as of version 0.1.0 and will be
+    removed in version 1.0. Use RunnableAgent with LCEL-based agent construction
+    (create_react_agent, create_openai_functions_agent, etc.) instead.
+    
+    **Legacy Architecture:**
+    This agent is driven by an LLMChain. The prompt in the LLMChain MUST include
+    a variable called "agent_scratchpad" where the agent accumulates its
+    intermediary work (previous actions and observations).
+    
+    **Relationship to BaseSingleActionAgent:**
+    Agent extends BaseSingleActionAgent, implementing plan() by:
+    1. Constructing scratchpad from intermediate_steps
+    2. Calling llm_chain.predict() with inputs + scratchpad
+    3. Parsing LLM output with output_parser to get AgentAction or AgentFinish
+    
+    **Migration Guidance:**
+    Instead of Agent with LLMChain, use modern Runnable-based agents:
+    
+    ```python
+    # Old (deprecated):
+    from langchain_classic.agents import Agent, AgentExecutor
+    agent = Agent(llm_chain=llm_chain, output_parser=parser)
+    
+    # New (recommended):
+    from langchain_classic.agents import create_react_agent, AgentExecutor
+    agent = create_react_agent(llm, tools, prompt)
+    executor = AgentExecutor(agent=agent, tools=tools)
+    ```
+    
+    Args:
+        llm_chain: LLMChain to use for agent reasoning. Prompt must include
+            'agent_scratchpad' variable for accumulating trajectory.
+        output_parser: AgentOutputParser to parse LLM output into AgentAction
+            or AgentFinish.
+        allowed_tools: Optional list of allowed tool names. If None, all tools
+            provided to AgentExecutor are allowed.
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:710
     """
 
     llm_chain: LLMChain
@@ -990,7 +1217,30 @@ class Agent(BaseSingleActionAgent):
 
 
 class ExceptionTool(BaseTool):
-    """Tool that just returns the query."""
+    """Fallback tool for handling parsing errors.
+    
+    Internal tool used by AgentExecutor when handle_parsing_errors is enabled
+    and agent output cannot be parsed into valid AgentAction. Simply returns
+    the input string as observation, allowing the error message to be passed
+    back to the agent for recovery.
+    
+    **When Used:**
+    Activated automatically by AgentExecutor when:
+    1. OutputParserException is raised during agent.plan()
+    2. handle_parsing_errors is configured (True, string, or callable)
+    3. Error observation needs to be returned to agent
+    
+    **Purpose:**
+    Enables graceful error recovery by treating parsing errors as tool execution
+    results, giving the agent another chance to generate valid output based on
+    the error feedback.
+    
+    Args:
+        name: Tool name, always "_Exception" for internal identification.
+        description: Tool description, always "Exception tool".
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:992
+    """
 
     name: str = "_Exception"
     """Name of the tool."""
@@ -1019,7 +1269,132 @@ RunnableAgentType = RunnableAgent | RunnableMultiActionAgent
 
 
 class AgentExecutor(Chain):
-    """Agent that is using tools."""
+    """Orchestrates agent reasoning loop with tool execution.
+    
+    AgentExecutor wraps a BaseSingleActionAgent or BaseMultiActionAgent with tools,
+    executing the iterative thought-action-observation loop until the agent returns
+    a final answer or reaches configured limits.
+    
+    **Architecture:**
+    The executor manages the agent lifecycle by:
+    1. Invoking agent.plan() to select next action(s)
+    2. Executing selected tool(s) and collecting observations
+    3. Passing observations back to agent for next planning iteration
+    4. Repeating until AgentFinish is returned or limits are reached
+    
+    **Agent Decision Loop:**
+    ```mermaid
+    graph TD
+        A[Start: User Input] --> B[Agent Planning: plan]
+        B --> C{AgentFinish?}
+        C -->|Yes| D[Return Output]
+        C -->|No| E[AgentAction Selected]
+        E --> F[Execute Tool]
+        F --> G[Observation Result]
+        G --> H{Max Iterations or Time?}
+        H -->|Yes| I[Early Stopping]
+        H -->|No| B
+        I --> D
+    ```
+    
+    **Tool Interface Contract:**
+    Tools provided to the agent must implement the BaseTool interface with:
+    - name (str, required): Unique tool identifier used in agent reasoning and selection
+    - description (str, required): Natural language description for agent context,
+      critical for the agent to understand when and how to use the tool
+    - args_schema (Pydantic BaseModel, required): Structured input validation schema
+      defining expected arguments with types and constraints
+    
+    **Callback Integration:**
+    The executor triggers callbacks at key lifecycle points:
+    - on_agent_action: Called before tool execution with AgentAction
+    - on_agent_finish: Called when agent completes with AgentFinish
+    - on_tool_start: Called before tool.run() with tool name and inputs
+    - on_tool_end: Called after tool.run() with observation
+    - on_tool_error: Called when tool execution raises exception
+    
+    **Error Handling Patterns:**
+    - Tool execution failures: ToolException caught, observation returned to agent
+    - Parsing errors: Controlled by handle_parsing_errors (bool/str/Callable)
+    - Max iterations: Triggers early_stopping_method ('force' or 'generate')
+    - Timeout: Triggers early stopping based on max_execution_time
+    
+    Args:
+        agent: The agent for planning actions. Can be BaseSingleActionAgent (returns
+            single action per step), BaseMultiActionAgent (returns multiple actions),
+            or Runnable (automatically wrapped in RunnableAgent/RunnableMultiActionAgent
+            based on output type).
+        tools: Valid tools the agent can call. Each tool must have unique name,
+            description, and args_schema. Agent's allowed_tools (if set) must match
+            provided tool names exactly.
+        return_intermediate_steps: Whether to return agent trajectory
+            (intermediate_steps) in final output dict. Useful for debugging and
+            transparency. Defaults to False.
+        max_iterations: Maximum planning steps before early stopping. Setting to None
+            could lead to infinite loop if agent never returns AgentFinish. Defaults
+            to 15.
+        max_execution_time: Maximum wall clock time (seconds) for execution loop.
+            None means no time limit. Defaults to None.
+        early_stopping_method: Strategy when max_iterations or max_execution_time
+            reached. 'force' returns constant message; 'generate' calls agent LLM
+            one final time for answer based on trajectory. Defaults to 'force'.
+        handle_parsing_errors: Strategy for OutputParserException from agent output.
+            False (default) raises error. True sends error back to agent as
+            observation. String value sends that string as observation. Callable
+            receives exception and returns observation string.
+        trim_intermediate_steps: How to trim trajectory before returning. -1 (default)
+            means no trimming. Positive int keeps last N steps. Callable receives
+            full trajectory and returns trimmed version.
+    
+    Returns:
+        Final output dict with keys:
+        - 'output': Agent's final answer (always present)
+        - 'intermediate_steps': List of (AgentAction, observation) tuples
+          (only if return_intermediate_steps=True)
+    
+    Raises:
+        ValueError: When tools incompatible with agent.get_allowed_tools()
+        ValueError: When parsing errors occur and handle_parsing_errors=False
+        OutputParserException: When agent output cannot be parsed and
+            handle_parsing_errors=False
+    
+    Example:
+        ```python
+        from langchain_classic.agents import AgentExecutor, create_react_agent
+        from langchain_classic.tools import Tool
+        from langchain_openai import ChatOpenAI
+        
+        # Define custom tool
+        def search_tool(query: str) -> str:
+            \"\"\"Search for information.\"\"\"
+            return f"Results for: {query}"
+        
+        tools = [Tool(
+            name="search",
+            func=search_tool,
+            description="Useful for searching information"
+        )]
+        
+        llm = ChatOpenAI(temperature=0)
+        agent = create_react_agent(llm, tools)
+        
+        # Create executor with configuration
+        agent_executor = AgentExecutor(
+            agent=agent,
+            tools=tools,
+            max_iterations=10,
+            return_intermediate_steps=True,
+            handle_parsing_errors=True
+        )
+        
+        # Execute agent
+        result = agent_executor.invoke({"input": "What is LangChain?"})
+        print(result["output"])
+        print(f"Steps taken: {len(result.get('intermediate_steps', []))}")
+        ```
+    
+    Source: libs/langchain/langchain_classic/agents/agent.py:1021
+    """
 
     agent: BaseSingleActionAgent | BaseMultiActionAgent | Runnable
     """The agent to run for creating a plan and determining actions
@@ -1072,16 +1447,39 @@ class AgentExecutor(Chain):
         callbacks: Callbacks = None,
         **kwargs: Any,
     ) -> AgentExecutor:
-        """Create from agent and tools.
+        """Create AgentExecutor from agent and tools.
+        
+        Factory method providing convenient construction of AgentExecutor with
+        required agent and tools, plus optional configuration.
 
         Args:
-            agent: Agent to use.
-            tools: Tools to use.
-            callbacks: Callbacks to use.
-            kwargs: Additional arguments.
+            agent: Agent instance for planning. Can be BaseSingleActionAgent,
+                BaseMultiActionAgent, or Runnable (automatically wrapped).
+            tools: Sequence of BaseTool instances available to agent. Tool names
+                must be unique and match agent.get_allowed_tools() if specified.
+            callbacks: Optional callbacks for chain execution events.
+            **kwargs: Additional AgentExecutor configuration (max_iterations,
+                max_execution_time, return_intermediate_steps,
+                handle_parsing_errors, etc.).
 
         Returns:
-            Agent executor object.
+            Configured AgentExecutor instance ready for invocation.
+        
+        Example:
+            ```python
+            from langchain_classic.agents import AgentExecutor, create_react_agent
+            from langchain_classic.tools import Tool
+            
+            agent = create_react_agent(llm, tools)
+            executor = AgentExecutor.from_agent_and_tools(
+                agent=agent,
+                tools=tools,
+                max_iterations=10,
+                verbose=True
+            )
+            ```
+        
+        Source: libs/langchain/langchain_classic/agents/agent.py:1068
         """
         return cls(
             agent=agent,
@@ -1322,12 +1720,44 @@ class AgentExecutor(Chain):
         run_manager: CallbackManagerForChainRun | None = None,
     ) -> Iterator[AgentFinish | AgentAction | AgentStep]:
         """Take a single step in the thought-action-observation loop.
-
+        
+        Implements the core agent reasoning cycle: calls agent.plan() to get next
+        action(s), executes tool(s), and yields results. Handles parsing errors
+        according to handle_parsing_errors configuration.
+        
+        Type flow: intermediate_steps → agent.plan() → AgentAction/AgentFinish →
+        tool execution → observation string → AgentStep
+        
         Override this to take control of how the agent makes and acts on choices.
+        
+        Args:
+            name_to_tool_map: Mapping of tool name to BaseTool instance for lookup.
+                Constructed from self.tools at start of execution loop.
+            color_mapping: Mapping of tool name to color string for logging output.
+                Used to visually distinguish different tools in verbose mode.
+            inputs: User inputs dict passed to agent.plan(). Contains original query
+                and any additional context.
+            intermediate_steps: Trajectory of (AgentAction, observation) tuples
+                from previous iterations. Passed to agent for context.
+            run_manager: Optional callback manager for triggering on_agent_action,
+                on_tool_start, on_tool_end callbacks.
+        
+        Yields:
+            - AgentFinish: When agent determines task is complete (ends iteration)
+            - AgentAction: Action(s) to execute (before tool execution)
+            - AgentStep: Result after tool execution (action + observation)
+        
+        Raises:
+            ValueError: When OutputParserException occurs and handle_parsing_errors
+                is False or invalid type
+        
+        Source: libs/langchain/langchain_classic/agents/agent.py:1316
         """
         try:
             intermediate_steps = self._prepare_intermediate_steps(intermediate_steps)
 
+            # Type flow: intermediate_steps (list[tuple[AgentAction, str]]) 
+            # → agent.plan() → output (AgentAction | AgentFinish)
             # Call the LLM to see what to do.
             output = self._action_agent.plan(
                 intermediate_steps,
@@ -1399,6 +1829,24 @@ class AgentExecutor(Chain):
         agent_action: AgentAction,
         run_manager: CallbackManagerForChainRun | None = None,
     ) -> AgentStep:
+        """Execute a single agent action and return observation.
+        
+        Looks up requested tool, executes it with agent_action.tool_input, and
+        wraps result in AgentStep. If tool not found, executes InvalidTool with
+        available tool names.
+        
+        Args:
+            name_to_tool_map: Mapping of tool name to BaseTool instance.
+            color_mapping: Mapping of tool name to color for logging.
+            agent_action: Action selected by agent containing tool name and input.
+            run_manager: Optional callback manager for on_agent_action callback.
+        
+        Returns:
+            AgentStep containing the executed action and observation string from
+            tool execution.
+        
+        Source: libs/langchain/langchain_classic/agents/agent.py:1395
+        """
         if run_manager:
             run_manager.on_agent_action(agent_action, color="green")
         # Otherwise we lookup the tool
@@ -1409,6 +1857,8 @@ class AgentExecutor(Chain):
             tool_run_kwargs = self._action_agent.tool_run_logging_kwargs()
             if return_direct:
                 tool_run_kwargs["llm_prefix"] = ""
+            # Type flow: AgentAction.tool_input (str | dict) 
+            # → tool.run() → observation (str)
             # We then call the tool on the tool input to get an observation
             observation = tool.run(
                 agent_action.tool_input,
@@ -1587,7 +2037,36 @@ class AgentExecutor(Chain):
         inputs: dict[str, str],
         run_manager: CallbackManagerForChainRun | None = None,
     ) -> dict[str, Any]:
-        """Run text through and get agent response."""
+        """Run text through and get agent response.
+        
+        Executes the agent reasoning loop synchronously, iterating through
+        thought-action-observation cycles until the agent returns a final answer
+        or configured limits are reached.
+        
+        Type flow: Dict[str,str] inputs → agent planning loop → tool observations
+        → Dict[str,Any] final output
+        
+        Args:
+            inputs: User inputs as dict with string keys and values. Must contain
+                keys required by agent.input_keys. Common keys include 'input',
+                'question', or 'query' depending on agent type.
+            run_manager: Optional callback manager for chain run. Used to trigger
+                on_agent_action, on_agent_finish, and tool lifecycle callbacks.
+        
+        Returns:
+            Dict containing:
+            - 'output' (str): Agent's final answer
+            - 'intermediate_steps' (list[tuple[AgentAction, str]]): Trajectory of
+              actions and observations (only if return_intermediate_steps=True)
+        
+        Raises:
+            ValueError: When max_iterations or max_execution_time limit reached
+                and early_stopping_method fails
+            OutputParserException: When agent output cannot be parsed and
+                handle_parsing_errors=False
+        
+        Source: libs/langchain/langchain_classic/agents/agent.py:1585
+        """
         # Construct a mapping of tool name to tool for easy lookup
         name_to_tool_map = {tool.name: tool for tool in self.tools}
         # We construct a mapping from each tool to a color, used for logging.
@@ -1641,7 +2120,41 @@ class AgentExecutor(Chain):
         inputs: dict[str, str],
         run_manager: AsyncCallbackManagerForChainRun | None = None,
     ) -> dict[str, str]:
-        """Async run text through and get agent response."""
+        """Async run text through and get agent response.
+        
+        Executes the agent reasoning loop asynchronously with async/await support,
+        iterating through thought-action-observation cycles until the agent returns
+        a final answer or configured limits are reached.
+        
+        Lifecycle identical to _call but with async tool execution and proper
+        timeout handling via asyncio_timeout context manager.
+        
+        Type flow: Dict[str,str] inputs → async agent planning loop → async tool
+        observations → Dict[str,Any] final output
+        
+        Args:
+            inputs: User inputs as dict with string keys and values. Must contain
+                keys required by agent.input_keys. Common keys include 'input',
+                'question', or 'query' depending on agent type.
+            run_manager: Optional async callback manager for chain run. Used to
+                trigger async on_agent_action, on_agent_finish, and tool lifecycle
+                callbacks in async context.
+        
+        Returns:
+            Dict containing:
+            - 'output' (str): Agent's final answer
+            - 'intermediate_steps' (list[tuple[AgentAction, str]]): Trajectory of
+              actions and observations (only if return_intermediate_steps=True)
+        
+        Raises:
+            TimeoutError: When max_execution_time exceeded (asyncio timeout)
+            ValueError: When max_iterations limit reached and early_stopping_method
+                fails
+            OutputParserException: When agent output cannot be parsed and
+                handle_parsing_errors=False
+        
+        Source: libs/langchain/langchain_classic/agents/agent.py:1639
+        """
         # Construct a mapping of tool name to tool for easy lookup
         name_to_tool_map = {tool.name: tool for tool in self.tools}
         # We construct a mapping from each tool to a color, used for logging.

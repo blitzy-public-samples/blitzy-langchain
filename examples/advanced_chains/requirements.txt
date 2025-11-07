@@ -1,0 +1,126 @@
+# Advanced LangChain Examples - Dependency Specification
+# ======================================================
+# This file specifies all dependencies required to run the advanced chain examples
+# in this directory. These examples demonstrate complex patterns including RAG,
+# memory integration, agent tool usage, streaming, async execution, and error recovery.
+#
+# Installation:
+#   pip install -r requirements.txt
+#   or
+#   uv pip install -r requirements.txt
+#
+# Source: Agent Action Plan section 0.6.1 - Documentation Dependencies
+# Versions validated against: libs/langchain/pyproject.toml, libs/core/pyproject.toml,
+#                            libs/partners/openai/pyproject.toml
+
+# =============================================================================
+# CORE DEPENDENCIES (Required for all examples)
+# =============================================================================
+# These packages are required for basic LangChain functionality and are needed
+# by all examples in this directory.
+
+# LangChain core abstractions (Runnable protocol, LCEL, message types)
+# Source: libs/core/pyproject.toml version 1.0.1
+langchain-core>=1.0.1,<2.0.0
+
+# LangChain classic chains and utilities (LLMChain, SequentialChain, etc.)
+# Source: libs/langchain/pyproject.toml version 1.0.0
+langchain-classic>=1.0.0,<2.0.0
+
+# OpenAI integration for LLM and embedding models
+# Required by: retrieval_qa_chain.py, memory_enabled_chain.py, streaming_responses.py,
+#              async_chain_execution.py, fallback_chains.py
+# Source: libs/partners/openai/pyproject.toml version 1.0.1
+langchain-openai>=1.0.1,<2.0.0
+
+# Data validation using Python type annotations
+# Required for structured chain inputs/outputs and Pydantic model validation
+# Source: libs/core/pyproject.toml
+pydantic>=2.7.4,<3.0.0
+
+# Environment variable management for API keys and configuration
+# Required by: All examples for loading .env files
+# Source: libs/langchain/pyproject.toml dependency-groups.test_integration
+python-dotenv>=1.0.0,<2.0.0
+
+# Type hint support for Python 3.10+
+# Required for proper type annotation in examples
+# Source: libs/core/pyproject.toml
+typing-extensions>=4.7.0,<5.0.0
+
+# =============================================================================
+# OPTIONAL DEPENDENCIES (Required for specific advanced examples)
+# =============================================================================
+# These packages are needed only by certain examples. Install only if you plan
+# to run the examples that require them.
+
+# --- Anthropic Claude Integration ---
+# Required by: fallback_chains.py (demonstrates fallback from OpenAI to Claude)
+# Source: Agent Action Plan section 0.6.1
+langchain-anthropic>=0.3.22,<1.0.0
+
+# --- Vector Store Dependencies ---
+# Required by: retrieval_qa_chain.py (demonstrates RAG with vector search)
+
+# Chroma vector store integration for LangChain
+# Source: Agent Action Plan section 0.6.1
+langchain-chroma>=0.1.0,<1.0.0
+
+# Chroma database for vector storage and similarity search
+# Source: Agent Action Plan section 0.6.1
+chromadb>=0.4.22,<1.0.0
+
+# Numerical operations for embeddings and vector computations
+# Version varies by Python version to ensure compatibility
+# Source: libs/langchain/pyproject.toml dependency-groups.test
+numpy>=1.26.4,<2.0.0; python_version<'3.13'
+numpy>=2.1.0,<3.0.0; python_version>='3.13'
+
+# =============================================================================
+# TESTING DEPENDENCIES (Optional - for validating examples)
+# =============================================================================
+# These packages enable automated testing of example code to ensure they
+# execute correctly. Install only if you want to run the test suite.
+
+# Testing framework for Python
+# Source: libs/langchain/pyproject.toml dependency-groups.test
+pytest>=8.0.0,<9.0.0
+
+# Pytest plugin for testing async code
+# Required by: Tests for async_chain_execution.py
+# Source: libs/langchain/pyproject.toml dependency-groups.test
+pytest-asyncio>=0.21.1,<1.0.0
+
+# =============================================================================
+# NOTES ON USAGE
+# =============================================================================
+#
+# Minimal Installation (for most examples):
+#   The core dependencies section is sufficient for:
+#   - memory_enabled_chain.py
+#   - streaming_responses.py
+#   - async_chain_execution.py
+#
+# Full Installation (for all examples):
+#   Install all dependencies including optional ones to run all examples
+#   without errors.
+#
+# Example-Specific Requirements:
+#   - retrieval_qa_chain.py: Requires langchain-chroma, chromadb, numpy
+#   - fallback_chains.py: Requires langchain-anthropic
+#
+# Python Version Compatibility:
+#   All dependencies support Python >=3.10.0,<4.0.0
+#   Source: libs/langchain/pyproject.toml and libs/core/pyproject.toml
+#
+# Environment Variables:
+#   See .env.example in this directory for required API keys and configuration.
+#   At minimum, you need:
+#   - OPENAI_API_KEY (required for all examples)
+#   - ANTHROPIC_API_KEY (required only for fallback_chains.py)
+#
+# Troubleshooting:
+#   If you encounter dependency conflicts, try installing with:
+#     uv pip install --resolution=highest -r requirements.txt
+#   This uses the UV package manager's dependency resolver which handles
+#   complex version constraints more effectively than pip.

@@ -1,0 +1,311 @@
+# MkDocs Configuration for LangChain Integration Documentation
+# This configuration defines the documentation site structure, theme, plugins,
+# and navigation for comprehensive LangChain integration documentation with
+# auto-generated API references from Python docstrings.
+
+# Site Metadata
+site_name: LangChain Integration Documentation
+site_description: >-
+  Comprehensive documentation for LangChain integration code with type-annotated
+  API references, executable examples, debugging guides, and production-ready patterns.
+site_author: LangChain Team
+site_url: https://docs.langchain.com/
+
+# Repository Information
+repo_name: langchain
+repo_url: https://github.com/langchain-ai/langchain
+edit_uri: edit/main/docs/
+
+# Copyright
+copyright: Copyright &copy; 2024 LangChain
+
+# Documentation Structure
+docs_dir: docs
+site_dir: site
+
+# Validation configuration - allow links to files outside docs_dir (like examples/)
+validation:
+  not_found: warn  # Don't fail on links to repository files outside docs/
+
+# Theme Configuration
+theme:
+  name: material
+  
+  # Color Scheme
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  
+  # Theme Features
+  features:
+    # Navigation
+    - navigation.instant        # Instant loading (SPA-like)
+    - navigation.tracking       # URL updates with scroll
+    - navigation.tabs           # Top-level tabs
+    - navigation.tabs.sticky    # Sticky tabs
+    - navigation.sections       # Section navigation
+    - navigation.expand         # Expand subsections
+    - navigation.path           # Breadcrumb navigation
+    - navigation.indexes        # Section index pages
+    - navigation.top            # Back to top button
+    
+    # Search
+    - search.suggest            # Search suggestions
+    - search.highlight          # Highlight search terms
+    - search.share              # Share search link
+    
+    # Table of Contents
+    - toc.follow                # Follow TOC with scroll
+    - toc.integrate             # Integrate TOC in navigation
+    
+    # Content
+    - content.code.copy         # Copy code button
+    - content.code.annotate     # Code annotations
+    - content.tabs.link         # Link tabs across pages
+  
+  # Theme Customization
+  language: en
+  
+  # Icons
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+  
+  # Fonts
+  font:
+    text: Roboto
+    code: Roboto Mono
+  
+  # Logo and Favicon
+  logo: assets/logo.png
+  favicon: assets/favicon.png
+
+# Plugins
+plugins:
+  # Search plugin
+  - search:
+      separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
+      lang:
+        - en
+  
+  # Automatic cross-references (required by mkdocstrings)
+  - autorefs
+  
+  # API documentation from docstrings
+  - mkdocstrings:
+      enabled: true
+      default_handler: python
+      handlers:
+        python:
+          options:
+            # Docstring style
+            docstring_style: google
+            docstring_options:
+              ignore_init_summary: false
+            
+            # Member options
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_object_full_path: false
+            show_category_heading: true
+            show_if_no_docstring: false
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+            
+            # Additional members
+            members_order: source
+            group_by_category: true
+            show_submodules: false
+            
+            # Filters
+            filters:
+              - "!^_"  # Exclude private members
+              - "!^__"  # Exclude magic methods (except documented ones)
+            
+            # Headings
+            heading_level: 2
+            
+            # Type annotations
+            annotations_path: brief
+            
+            # Merge init into class
+            merge_init_into_class: true
+            
+            # Rendering
+            summary: true
+            show_bases: true
+            show_inheritance_diagram: false
+
+# Markdown Extensions
+markdown_extensions:
+  # Python Markdown Extensions
+  - abbr                        # Abbreviations
+  - admonition                  # Admonition blocks (note, warning, etc.)
+  - attr_list                   # Attribute lists for styling
+  - def_list                    # Definition lists
+  - footnotes                   # Footnotes
+  - md_in_html                  # Markdown in HTML
+  - tables                      # Tables
+  - toc:                        # Table of contents
+      permalink: true
+      permalink_title: Link to this section
+      toc_depth: 3
+  
+  # PyMdown Extensions
+  - pymdownx.arithmatex:        # Math rendering
+      generic: true
+  - pymdownx.betterem:          # Better emphasis
+      smart_enable: all
+  - pymdownx.caret              # Insert and superscript
+  - pymdownx.mark               # Mark/highlight text
+  - pymdownx.tilde              # Delete and subscript
+  - pymdownx.critic             # Critic markup
+  - pymdownx.details            # Collapsible details
+  - pymdownx.emoji:             # Emoji support
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:         # Code highlighting
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+      auto_title: true
+      linenums: true
+  - pymdownx.inlinehilite       # Inline code highlighting
+  - pymdownx.keys               # Keyboard keys
+  - pymdownx.magiclink:         # Automatic links
+      repo_url_shorthand: true
+      user: langchain-ai
+      repo: langchain
+  - pymdownx.smartsymbols       # Smart symbols
+  - pymdownx.superfences:       # Code blocks and diagrams
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:            # Tabbed content
+      alternate_style: true
+  - pymdownx.tasklist:          # Task lists
+      custom_checkbox: true
+      clickable_checkbox: false
+  - pymdownx.snippets:          # Include snippets
+      check_paths: true
+
+# Extra Configuration
+extra:
+  # Version selector
+  version:
+    provider: mike
+  
+  # Social links
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/langchain-ai/langchain
+      name: GitHub Repository
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/langchain/
+      name: PyPI Package
+    - icon: fontawesome/brands/twitter
+      link: https://twitter.com/langchainai
+      name: Twitter
+    - icon: fontawesome/brands/discord
+      link: https://discord.gg/langchain
+      name: Discord Community
+  
+  # Analytics (optional - uncomment and add ID)
+  # analytics:
+  #   provider: google
+  #   property: G-XXXXXXXXXX
+
+# Navigation Structure
+nav:
+  - Home: index.md
+  
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+      - Core Concepts: getting-started/concepts.md
+  
+  - Guides:
+      - LCEL Composition: guides/lcel-composition.md
+      - Chain Types: guides/chain-types.md
+      - Memory Integration: guides/memory-integration.md
+      - Agent Development: guides/agent-development.md
+      - Async Usage: guides/async-usage.md
+      - Error Handling: guides/error-handling.md
+      - Callbacks: guides/callbacks.md
+      - Production Deployment: guides/production-deployment.md
+  
+  - API Reference:
+      - Chains:
+          - Base Chain: api-reference/chains/base.md
+          - LLM Chain: api-reference/chains/llm-chain.md
+          - Sequential Chains: api-reference/chains/sequential.md
+          - Retrieval Chain: api-reference/chains/retrieval.md
+          - Specialized Chains: api-reference/chains/specialized/
+      
+      - Runnables:
+          - Base Runnable: api-reference/runnables/base.md
+          - Composition: api-reference/runnables/composition.md
+          - Utilities: api-reference/runnables/utilities.md
+      
+      - Prompts:
+          - Templates: api-reference/prompts/templates.md
+          - Message Types: api-reference/prompts/message-types.md
+      
+      - Agents:
+          - Agent Types: api-reference/agents/agent-types.md
+          - Tools: api-reference/agents/tools.md
+      
+      - Memory:
+          - Buffer Memory: api-reference/memory/buffer-memory.md
+      
+      - Callbacks:
+          - Handlers: api-reference/callbacks/handlers.md
+      
+      - Utilities:
+          - Output Parsers: api-reference/utilities/output-parsers.md
+  
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Chain Lifecycle: architecture/chain-lifecycle.md
+      - LCEL Type System: architecture/lcel-type-system.md
+      - Callback System: architecture/callback-system.md
+      - Message Flow: architecture/message-flow.md
+  
+  - Debugging:
+      - Common Issues: debugging/common-issues.md
+      - Logging: debugging/logging.md
+      - Stack Traces: debugging/stack-traces.md
+      - Troubleshooting: debugging/troubleshooting.md
+  
+  - Contributing:
+      - Documentation: contributing/documentation.md
+      - Testing: contributing/testing.md
+
+# Build Configuration
+strict: false                   # Allow warnings for links to examples/ outside docs_dir
+use_directory_urls: true        # Use directory URLs
+
+# Watch Configuration (for mkdocs serve)
+watch:
+  - docs/
+  - examples/

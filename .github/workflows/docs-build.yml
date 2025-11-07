@@ -1,0 +1,236 @@
+# Comprehensive Documentation Validation Pipeline
+#
+# Validates all aspects of LangChain integration documentation:
+# - MkDocs site builds without errors or broken references
+# - All executable examples run successfully
+# - 100% type annotation coverage with mypy strict mode
+# - All internal and external links resolve correctly
+#
+# Triggers on pull requests and pushes to master to catch documentation
+# issues early in the development workflow.
+
+name: "📚 Documentation Validation"
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# Cancel redundant workflow runs when new commits are pushed
+# to the same PR or branch. Documentation validation can be resource-intensive,
+# so canceling outdated runs improves CI efficiency.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "true"
+  UV_NO_SYNC: "true"
+
+jobs:
+  # Job 1: Build MkDocs documentation site
+  # Validates that all markdown files compile correctly and no broken
+  # internal references exist. Runs in strict mode to fail on warnings.
+  mkdocs-build:
+    name: "📚 Build MkDocs Site"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v5
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        id: setup-python
+        with:
+          python-version: "3.11"
+          cache-suffix: docs
+
+      - name: "📦 Install Documentation Dependencies"
+        shell: bash
+        run: |
+          uv pip install mkdocs==1.5.3 \
+            mkdocs-material==9.4.8 \
+            mkdocstrings[python]==0.24.0 \
+            mkdocstrings-python==1.7.5 \
+            pymdown-extensions==10.5 \
+            mkdocs-minify-plugin==0.7.1 \
+            mkdocs-redirects==1.2.1 \
+            markdown-include==0.8.1
+
+      - name: "🔨 Build Documentation Site"
+        shell: bash
+        run: |
+          # Build with --clean to remove stale files
+          # Build with --strict to fail on warnings or broken references
+          mkdocs build --clean --strict
+
+      - name: "🧹 Verify Clean Working Directory"
+        shell: bash
+        run: |
+          set -eu
+
+          STATUS="$(git status)"
+          echo "$STATUS"
+
+          # Fail if working directory has uncommitted changes
+          # This ensures the build process doesn't modify source files
+          echo "$STATUS" | grep 'nothing to commit, working tree clean'
+
+      - name: "💾 Upload Documentation Site Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: site/
+          retention-days: 7
+
+  # Job 2: Validate executable examples
+  # Runs all example Python files to ensure they execute without errors.
+  # Uses pytest with timeout to catch hanging examples.
+  example-validation:
+    name: "🧪 Validate Executable Examples"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v5
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        id: setup-python
+        with:
+          python-version: "3.11"
+          cache-suffix: examples
+
+      - name: "📦 Install Example Dependencies"
+        shell: bash
+        run: |
+          uv pip install pytest==8.4.2 \
+            pytest-asyncio==1.2.0 \
+            langchain-core \
+            langchain-classic \
+            langchain-openai \
+            python-dotenv
+
+      - name: "🧪 Run Example Validation Tests"
+        shell: bash
+        env:
+          # Provide test API key for graceful skipping when examples
+          # check for API key availability
+          OPENAI_API_KEY: "test-key-for-validation"
+        run: |
+          # Run all examples with short traceback for readability
+          # Timeout of 30 seconds per test catches hanging examples
+          pytest examples/ --tb=short --timeout=30
+
+  # Job 3: Type annotation validation
+  # Validates 100% type annotation coverage using mypy in strict mode.
+  # Ensures all public APIs are fully type-annotated per documentation requirements.
+  type-checking:
+    name: "🔍 Type Annotation Validation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v5
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        id: setup-python
+        with:
+          python-version: "3.11"
+          cache-suffix: typecheck
+
+      - name: "📦 Install Type Checking Dependencies"
+        shell: bash
+        run: |
+          uv pip install mypy==1.18.2
+
+      - name: "📦 Install LangChain Packages for Type Checking"
+        shell: bash
+        run: |
+          # Install langchain-core with all dependencies
+          cd libs/core
+          uv sync --frozen
+          cd ../..
+          
+          # Install langchain-classic with all dependencies
+          cd libs/langchain
+          uv sync --frozen
+          cd ../..
+
+      - name: "🔍 Run MyPy Strict Type Checking"
+        shell: bash
+        run: |
+          # Type check with strict mode to enforce:
+          # - No untyped function definitions
+          # - No Any types without explicit annotation
+          # - Required type annotations on all public functions
+          # - Validation of all type assertions
+          mypy --strict \
+            libs/langchain/langchain_classic \
+            libs/core/langchain_core
+
+      - name: "🧹 Verify Clean Working Directory"
+        shell: bash
+        run: |
+          set -eu
+
+          STATUS="$(git status)"
+          echo "$STATUS"
+
+          # Fail if type checking modified any files
+          echo "$STATUS" | grep 'nothing to commit, working tree clean'
+
+  # Job 4: Link validation
+  # Validates all internal and external links in generated documentation.
+  # Depends on mkdocs-build job to ensure site/ directory is available.
+  link-checking:
+    name: "🔗 Validate Documentation Links"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: mkdocs-build
+    steps:
+      - name: "📋 Checkout Code"
+        uses: actions/checkout@v5
+
+      - name: "🐍 Set up Python 3.11 + UV"
+        uses: "./.github/actions/uv_setup"
+        id: setup-python
+        with:
+          python-version: "3.11"
+          cache-suffix: linkcheck
+
+      - name: "📦 Install Documentation Dependencies"
+        shell: bash
+        run: |
+          uv pip install mkdocs==1.5.3 \
+            mkdocs-material==9.4.8 \
+            mkdocstrings[python]==0.24.0 \
+            mkdocstrings-python==1.7.5 \
+            pymdown-extensions==10.5 \
+            mkdocs-minify-plugin==0.7.1 \
+            mkdocs-redirects==1.2.1 \
+            markdown-include==0.8.1
+
+      - name: "🔨 Build Documentation Site"
+        shell: bash
+        run: |
+          # Rebuild documentation for link checking
+          mkdocs build
+
+      - name: "📦 Install Link Checker"
+        shell: bash
+        run: |
+          uv pip install linkchecker==10.4.0
+
+      - name: "🔗 Validate All Documentation Links"
+        shell: bash
+        run: |
+          # Check all links in the generated site
+          # --check-extern validates external URLs (GitHub, docs.langchain.com, etc.)
+          # Fails if any broken links are found
+          linkchecker site/ --check-extern

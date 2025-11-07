@@ -1,4 +1,32 @@
-"""Implementation of the RunnablePassthrough."""
+"""Implementation of RunnablePassthrough and related data manipulation runnables.
+
+This module provides Runnables for common data passthrough and manipulation patterns
+in LCEL (LangChain Expression Language) chains:
+
+- **RunnablePassthrough**: Passes input unchanged or optionally applies a side-effect
+  function. Useful for preserving original data while computing derived values in
+  parallel branches.
+
+- **RunnableAssign**: Adds new keys to dict inputs by running parallel Runnables,
+  merging results with the original input. Essential for enriching data with
+  computed fields while preserving original keys.
+
+- **RunnablePick**: Extracts specific keys from dict inputs, filtering unnecessary
+  data and selecting relevant fields for downstream Runnables.
+
+Common Use Cases:
+    - Preserving input data while adding computed values in RunnableParallel
+    - Enriching dict inputs with additional fields from parallel computations
+    - Filtering dict data to pass only relevant keys to subsequent chain steps
+    - Applying side effects (logging, validation) while passing data unchanged
+
+Type Flow Patterns:
+    - RunnablePassthrough: Input → (optional func) → Input (unchanged)
+    - RunnableAssign: Dict[str, Any] → parallel mappers → Dict with new keys added
+    - RunnablePick: Dict[str, Any] → key selection → Dict with only selected keys
+
+Source: libs/core/langchain_core/runnables/passthrough.py:1
+"""
 
 from __future__ import annotations
 
@@ -78,6 +106,35 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
     can be configured to add additional keys to the output, if the input is a
     dict.
 
+    **Identity Function Behavior:**
+    By default, RunnablePassthrough returns its input unchanged, acting as an
+    identity function. This is useful in LCEL chains when you need to preserve
+    the original input data while performing other operations in parallel.
+
+    **Optional Transformation with func Parameter:**
+    The `func` parameter allows you to specify a transformation function that is
+    applied to the input as a side effect, but the original input is still returned
+    unchanged. This is useful for logging, validation, or other side effects that
+    don't modify the data flow. The function receives the input and optionally a
+    RunnableConfig, but its return value is ignored.
+
+    **When to Use RunnablePassthrough vs RunnableLambda:**
+    - Use RunnablePassthrough when you want to preserve the input unchanged while
+      optionally performing side effects (logging, validation).
+    - Use RunnableLambda when you want to transform the input into a different output.
+    - RunnablePassthrough is optimized for the passthrough pattern and integrates
+      seamlessly with RunnableParallel for preserving original data.
+
+    **Type Flow:**
+    - Input → RunnablePassthrough() → Output (same as Input)
+    - Input → RunnablePassthrough(func=side_effect) → Output (same as Input, after
+      side_effect is called)
+
+    **Common Patterns with RunnableParallel:**
+    RunnablePassthrough is frequently used in RunnableParallel to preserve original
+    input while computing derived values in other branches. This pattern is essential
+    for enriching data without losing the original context.
+
     The examples below demonstrate this Runnable works using a few simple
     chains. The chains rely on simple lambdas to make the examples easy to execute
     and experiment with.
@@ -130,6 +187,8 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
         runnable.invoke("hello")
         # {'llm1': 'completion', 'llm2': 'completion', 'total_chars': 20}
         ```
+
+    Source: libs/core/langchain_core/runnables/passthrough.py:74
     """
 
     input_type: type[Other] | None = None
@@ -210,15 +269,54 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
         | Callable[[dict[str, Any]], Any]
         | Mapping[str, Runnable[dict[str, Any], Any] | Callable[[dict[str, Any]], Any]],
     ) -> RunnableAssign:
-        """Merge the Dict input with the output produced by the mapping argument.
+        """Factory method for creating a RunnableAssign instance.
+
+        This class method creates a RunnableAssign that merges the input dictionary
+        with outputs produced by the provided Runnables or Callables. This pattern
+        is essential for enriching data with computed fields while preserving all
+        original keys.
+
+        The method wraps the provided kwargs into a RunnableParallel, which executes
+        all provided Runnables/Callables in parallel, then merges their outputs with
+        the original input dictionary.
+
+        Type Flow:
+            Dict[str, Any] input → RunnableParallel(kwargs) → merge with input →
+            Dict[str, Any] output (with new keys added)
 
         Args:
-            **kwargs: Runnable, Callable or a Mapping from keys to Runnables
-                or Callables.
+            **kwargs: Keyword arguments mapping new key names to Runnables or
+                Callables. Each Runnable/Callable receives the input dict and
+                produces a value for the corresponding key. Can be:
+                - Runnable[dict[str, Any], Any]: A Runnable that processes the input
+                - Callable[[dict[str, Any]], Any]: A function that processes the input
+                - Mapping[str, Runnable | Callable]: A nested mapping of Runnables/Callables
 
         Returns:
-            A Runnable that merges the Dict input with the output produced by the
-            mapping argument.
+            RunnableAssign: A Runnable that merges the input dict with the outputs
+                produced by the mapping argument. Original keys are preserved,
+                and new keys are added from the parallel execution results.
+
+        Raises:
+            ValueError: If the input to the returned RunnableAssign is not a dict
+                (validated at runtime during invoke/ainvoke).
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnablePassthrough
+
+            # Create enrichment chain
+            enriched = RunnablePassthrough.assign(
+                total_length=lambda x: len(x["text"]),
+                word_count=lambda x: len(x["text"].split()),
+            )
+
+            # Invoke with dict input
+            result = enriched.invoke({"text": "Hello world"})
+            # Returns: {'text': 'Hello world', 'total_length': 11, 'word_count': 2}
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:237
         """
         return RunnableAssign(RunnableParallel[dict[str, Any]](kwargs))
 
@@ -226,6 +324,44 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
     def invoke(
         self, input: Other, config: RunnableConfig | None = None, **kwargs: Any
     ) -> Other:
+        """Invoke the passthrough on an input, returning the input unchanged.
+
+        If a func was provided during initialization, it will be called with the
+        input as a side effect (for logging, validation, etc.), but its return
+        value is ignored and the original input is returned.
+
+        Args:
+            input: The input to pass through unchanged. Can be any type.
+            config: Optional configuration for callbacks, tags, and metadata.
+                Used to track execution in LangSmith or custom callback handlers.
+            **kwargs: Additional keyword arguments passed to the func if provided.
+
+        Returns:
+            Other: The input value, unchanged. Type matches the input type.
+
+        Raises:
+            Exception: Any exception raised by the optional func will propagate.
+                The identity passthrough itself does not raise exceptions.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnablePassthrough
+
+            # Simple passthrough
+            passthrough = RunnablePassthrough()
+            result = passthrough.invoke("test")  # Returns: "test"
+
+            # Passthrough with side effect
+            def log_input(x):
+                print(f"Processing: {x}")
+
+            passthrough_with_logging = RunnablePassthrough(func=log_input)
+            result = passthrough_with_logging.invoke("data")
+            # Prints "Processing: data", returns "data"
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:258
+        """
         if self.func is not None:
             call_func_with_variable_args(
                 self.func, input, ensure_config(config), **kwargs
@@ -239,6 +375,47 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
         config: RunnableConfig | None = None,
         **kwargs: Any | None,
     ) -> Other:
+        """Asynchronously invoke the passthrough, returning the input unchanged.
+
+        If an afunc (async function) was provided during initialization, it will be
+        awaited with the input as a side effect. If only func (sync) was provided,
+        it will be called synchronously. The return value of either is ignored and
+        the original input is returned.
+
+        Args:
+            input: The input to pass through unchanged. Can be any type.
+            config: Optional configuration for callbacks, tags, and metadata.
+                Used to track execution in LangSmith or custom callback handlers.
+            **kwargs: Additional keyword arguments passed to afunc/func if provided.
+
+        Returns:
+            Other: The input value, unchanged. Type matches the input type.
+
+        Raises:
+            Exception: Any exception raised by the optional afunc/func will propagate.
+                The identity passthrough itself does not raise exceptions.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnablePassthrough
+
+            # Simple async passthrough
+            passthrough = RunnablePassthrough()
+            result = await passthrough.ainvoke("test")  # Returns: "test"
+
+            # Async passthrough with side effect
+            async def async_log_input(x):
+                await asyncio.sleep(0.1)  # Simulate async operation
+                print(f"Processing: {x}")
+
+            passthrough_with_logging = RunnablePassthrough(func=async_log_input)
+            result = await passthrough_with_logging.ainvoke("data")
+            # Prints "Processing: data" after delay, returns "data"
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:301
+        """
         if self.afunc is not None:
             await acall_func_with_variable_args(
                 self.afunc, input, ensure_config(config), **kwargs
@@ -256,6 +433,55 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Iterator[Other]:
+        """Transform a streaming input by passing chunks through unchanged.
+
+        This method handles streaming inputs (iterators) and passes each chunk
+        through unchanged, supporting the streaming/token-by-token pattern in
+        LCEL chains.
+
+        **Streaming Behavior:**
+        - Each chunk from the input iterator is yielded immediately
+        - If func was provided, it is called ONCE with the final aggregated value
+          after all chunks have been streamed
+        - The func call happens after streaming completes (side effect at the end)
+
+        **Chunk Aggregation Logic (when func is provided):**
+        - Attempts to aggregate chunks using the + operator
+        - If chunks are not addable (TypeError), uses the last chunk as final value
+        - The aggregated/final value is passed to func after streaming
+
+        Args:
+            input: Iterator of input chunks to pass through. Each chunk is yielded
+                unchanged to support streaming patterns.
+            config: Optional configuration for callbacks, tags, and metadata.
+            **kwargs: Additional keyword arguments passed to func if provided.
+
+        Yields:
+            Other: Each chunk from the input iterator, unchanged. Chunks are
+                yielded immediately to support streaming.
+
+        Raises:
+            Exception: Any exception raised by the optional func will propagate
+                after all chunks have been streamed.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnablePassthrough
+
+            def log_final(x):
+                print(f"Final: {x}")
+
+            passthrough = RunnablePassthrough(func=log_final)
+
+            # Stream chunks
+            chunks = iter(["Hello", " ", "world"])
+            result = list(passthrough.transform(chunks))
+            # Yields: "Hello", " ", "world" immediately
+            # Then prints: "Final: Hello world" after streaming completes
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:348
+        """
         if self.func is None:
             for chunk in self._transform_stream_with_config(input, identity, config):
                 yield chunk
@@ -287,6 +513,62 @@ class RunnablePassthrough(RunnableSerializable[Other, Other]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Other]:
+        """Asynchronously transform streaming input by passing chunks through unchanged.
+
+        This method handles async streaming inputs (async iterators) and passes
+        each chunk through unchanged, supporting async streaming patterns in LCEL chains.
+
+        **Async Streaming Behavior:**
+        - Each chunk from the async input iterator is yielded immediately
+        - If afunc (async) was provided, it is awaited ONCE with the final aggregated
+          value after all chunks have been streamed
+        - If only func (sync) was provided, it is called synchronously at the end
+        - The afunc/func call happens after streaming completes (side effect at the end)
+
+        **Chunk Aggregation Logic (when afunc/func is provided):**
+        - Attempts to aggregate chunks using the + operator
+        - If chunks are not addable (TypeError), uses the last chunk as final value
+        - The aggregated/final value is passed to afunc/func after streaming
+
+        Args:
+            input: AsyncIterator of input chunks to pass through. Each chunk is
+                yielded unchanged to support async streaming patterns.
+            config: Optional configuration for callbacks, tags, and metadata.
+            **kwargs: Additional keyword arguments passed to afunc/func if provided.
+
+        Yields:
+            Other: Each chunk from the input async iterator, unchanged. Chunks are
+                yielded immediately to support async streaming.
+
+        Raises:
+            Exception: Any exception raised by the optional afunc/func will propagate
+                after all chunks have been streamed.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnablePassthrough
+
+            async def async_log_final(x):
+                await asyncio.sleep(0.1)
+                print(f"Final: {x}")
+
+            passthrough = RunnablePassthrough(func=async_log_final)
+
+            # Stream chunks asynchronously
+            async def chunk_generator():
+                for chunk in ["Hello", " ", "world"]:
+                    yield chunk
+
+            result = []
+            async for chunk in passthrough.atransform(chunk_generator()):
+                result.append(chunk)
+            # Yields: "Hello", " ", "world" immediately
+            # Then prints: "Final: Hello world" after streaming completes
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:427
+        """
         if self.afunc is None and self.func is None:
             async for chunk in self._atransform_stream_with_config(
                 input, identity, config
@@ -357,6 +639,32 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
     these with the original data, introducing new key-value pairs based
     on the mapper's logic.
 
+    **Relationship to RunnablePassthrough.assign():**
+    RunnableAssign is typically created via the `RunnablePassthrough.assign()`
+    factory method rather than instantiated directly. The factory method provides
+    a convenient way to specify field assignments using keyword arguments.
+
+    **Type Flow:**
+    Dict[str, Any] input → RunnableParallel mapper (executes in parallel) →
+    merge outputs with input → Dict[str, Any] output (original + new keys)
+
+    **Key Preservation and Merging Logic:**
+    - ALL original keys from the input dict are preserved in the output
+    - New keys are added from the mapper's parallel execution results
+    - If a mapper key conflicts with an input key, the mapper's value overwrites it
+    - The merge uses Python's dict unpacking: {**input, **mapper_output}
+
+    **Use Cases for Enriching Data:**
+    - Adding computed fields (e.g., text length, token count) to existing data
+    - Enriching documents with metadata from parallel lookups
+    - Augmenting inputs with results from multiple parallel operations
+    - Building complex multi-step chains where each step adds context
+
+    **Type Constraints:**
+    - Input MUST be a dict[str, Any] - raises ValueError otherwise
+    - Output is always dict[str, Any] with original keys + new assigned keys
+    - Mapper Runnables/Callables receive the full input dict
+
     Examples:
         ```python
         # This is a RunnableAssign
@@ -387,6 +695,8 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         await runnable_assign.ainvoke({"input": 5})
         # returns {'input': 5, 'add_step': {'added': 15}}
         ```
+
+    Source: libs/core/langchain_core/runnables/passthrough.py:477
     """
 
     mapper: RunnableParallel
@@ -484,6 +794,28 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Internal method to invoke the mapper and merge results with input.
+
+        This method performs the core assignment logic:
+        1. Validates input is a dict
+        2. Invokes the mapper RunnableParallel with the input dict
+        3. Merges mapper outputs with original input using dict unpacking
+
+        Args:
+            value: Input dictionary to enrich with assigned fields.
+            run_manager: Callback manager for tracking execution.
+            config: Configuration with callbacks, tags, metadata.
+            **kwargs: Additional arguments passed to mapper.
+
+        Returns:
+            dict[str, Any]: Merged dictionary with original keys + new assigned keys.
+                Original input keys are preserved, mapper output keys are added.
+
+        Raises:
+            ValueError: If value is not a dict instance.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:605
+        """
         if not isinstance(value, dict):
             msg = "The input to RunnablePassthrough.assign() must be a dict."
             raise ValueError(msg)  # noqa: TRY004
@@ -504,6 +836,56 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Invoke the assignment, enriching input dict with new computed fields.
+
+        Invokes the mapper RunnableParallel to compute new fields, then merges
+        the results with the original input dict. This is the main entry point
+        for enriching data with additional computed values.
+
+        Args:
+            input: Input dictionary to enrich with assigned fields. Must be a
+                dict[str, Any] with keys expected by the mapper.
+            config: Optional configuration for callbacks, tags, and metadata.
+                Passed to the mapper for tracking execution.
+            **kwargs: Additional keyword arguments passed to the mapper.
+
+        Returns:
+            dict[str, Any]: Merged dictionary containing all original input keys
+                plus new keys computed by the mapper. If mapper keys conflict
+                with input keys, mapper values overwrite input values.
+
+        Raises:
+            ValueError: If input is not a dict instance. RunnableAssign requires
+                dict inputs for key-value assignment.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnablePassthrough
+
+            # Using RunnablePassthrough.assign() factory method
+            chain = RunnablePassthrough.assign(
+                text_length=lambda x: len(x["text"]),
+                word_count=lambda x: len(x["text"].split())
+            )
+            
+            result = chain.invoke({"text": "Hello world"})
+            # Returns: {
+            #     'text': 'Hello world',
+            #     'text_length': 11,
+            #     'word_count': 2
+            # }
+
+            # Chaining multiple assignments
+            chain = (
+                RunnablePassthrough.assign(upper=lambda x: x["text"].upper())
+                | RunnablePassthrough.assign(length=lambda x: len(x["upper"]))
+            )
+            result = chain.invoke({"text": "hello"})
+            # Returns: {'text': 'hello', 'upper': 'HELLO', 'length': 5}
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:833
+        """
         return self._call_with_config(self._invoke, input, config, **kwargs)
 
     async def _ainvoke(
@@ -513,6 +895,28 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Internal async method to invoke mapper and merge results with input.
+
+        This async method performs the core assignment logic asynchronously:
+        1. Validates input is a dict
+        2. Awaits the mapper RunnableParallel ainvoke with the input dict
+        3. Merges mapper outputs with original input using dict unpacking
+
+        Args:
+            value: Input dictionary to enrich with assigned fields.
+            run_manager: Async callback manager for tracking execution.
+            config: Configuration with callbacks, tags, metadata.
+            **kwargs: Additional arguments passed to mapper.
+
+        Returns:
+            dict[str, Any]: Merged dictionary with original keys + new assigned keys.
+                Original input keys are preserved, mapper output keys are added.
+
+        Raises:
+            ValueError: If value is not a dict instance.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:690
+        """
         if not isinstance(value, dict):
             msg = "The input to RunnablePassthrough.assign() must be a dict."
             raise ValueError(msg)  # noqa: TRY004
@@ -533,6 +937,58 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Asynchronously invoke the assignment, enriching input dict with new fields.
+
+        Asynchronously invokes the mapper RunnableParallel to compute new fields,
+        then merges the results with the original input dict. This is the async
+        entry point for enriching data with additional computed values.
+
+        Args:
+            input: Input dictionary to enrich with assigned fields. Must be a
+                dict[str, Any] with keys expected by the mapper.
+            config: Optional configuration for callbacks, tags, and metadata.
+                Passed to the mapper for tracking async execution.
+            **kwargs: Additional keyword arguments passed to the mapper.
+
+        Returns:
+            dict[str, Any]: Merged dictionary containing all original input keys
+                plus new keys computed by the mapper. If mapper keys conflict
+                with input keys, mapper values overwrite input values.
+
+        Raises:
+            ValueError: If input is not a dict instance. RunnableAssign requires
+                dict inputs for key-value assignment.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnablePassthrough
+
+            # Using RunnablePassthrough.assign() in async chain
+            chain = RunnablePassthrough.assign(
+                text_length=lambda x: len(x["text"]),
+                word_count=lambda x: len(x["text"].split())
+            )
+            
+            result = await chain.ainvoke({"text": "Hello world"})
+            # Returns: {
+            #     'text': 'Hello world',
+            #     'text_length': 11,
+            #     'word_count': 2
+            # }
+
+            # Async chain with async mapper functions
+            async def async_process(x):
+                await asyncio.sleep(0.1)  # Simulate async work
+                return x["text"].upper()
+
+            chain = RunnablePassthrough.assign(processed=async_process)
+            result = await chain.ainvoke({"text": "hello"})
+            # Returns: {'text': 'hello', 'processed': 'HELLO'}
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:934
+        """
         return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
 
     def _transform(
@@ -542,6 +998,36 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig,
         **kwargs: Any,
     ) -> Iterator[dict[str, Any]]:
+        """Internal method to transform streaming input by merging with mapper output.
+
+        This method handles streaming dict inputs and merges them with mapper outputs.
+        
+        **Streaming Merge Logic:**
+        1. Splits input stream into two: one for passthrough, one for mapper
+        2. Starts mapper transformation in background (parallel execution)
+        3. Yields passthrough chunks immediately, filtering out keys that will be
+           assigned by mapper (to avoid duplication)
+        4. After passthrough completes, yields all mapper output chunks
+        
+        **Key Filtering:** Passthrough chunks have mapper keys removed to prevent
+        duplication. Mapper outputs overwrite/add keys after passthrough completes.
+
+        Args:
+            values: Iterator of dict chunks to transform and enrich.
+            run_manager: Callback manager for tracking execution.
+            config: Configuration with callbacks, tags, metadata.
+            **kwargs: Additional arguments passed to mapper.
+
+        Yields:
+            dict[str, Any]: Chunks with merged data. First yields filtered passthrough
+                chunks (original keys except mapper keys), then yields mapper output
+                chunks with assigned fields.
+
+        Raises:
+            ValueError: If any chunk in values is not a dict instance.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:767
+        """
         # collect mapper keys
         mapper_keys = set(self.mapper.steps__.keys())
         # create two streams, one for the map and one for the passthrough
@@ -599,6 +1085,37 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
+        """Internal async method to transform streaming input by merging with mapper.
+
+        This async method handles streaming dict inputs asynchronously and merges
+        them with mapper outputs.
+        
+        **Async Streaming Merge Logic:**
+        1. Splits async input stream into two: one for passthrough, one for mapper
+        2. Starts mapper atransform as async task (parallel execution)
+        3. Yields passthrough chunks immediately, filtering out keys that will be
+           assigned by mapper (to avoid duplication)
+        4. After passthrough completes, awaits and yields all mapper output chunks
+        
+        **Key Filtering:** Passthrough chunks have mapper keys removed to prevent
+        duplication. Mapper outputs overwrite/add keys after passthrough completes.
+
+        Args:
+            values: AsyncIterator of dict chunks to transform and enrich.
+            run_manager: Async callback manager for tracking execution.
+            config: Configuration with callbacks, tags, metadata.
+            **kwargs: Additional arguments passed to mapper.
+
+        Yields:
+            dict[str, Any]: Chunks with merged data. First yields filtered passthrough
+                chunks (original keys except mapper keys), then yields mapper output
+                chunks with assigned fields.
+
+        Raises:
+            ValueError: If any chunk in values is not a dict instance.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:851
+        """
         # collect mapper keys
         mapper_keys = set(self.mapper.steps__.keys())
         # create two streams, one for the map and one for the passthrough
@@ -676,6 +1193,33 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
     from the input dictionary. It returns a new dictionary containing only
     the selected keys.
 
+    **Purpose:**
+    RunnablePick is used to filter dict inputs by extracting only the keys needed
+    by downstream Runnables. This reduces data passing overhead and makes chain
+    logic clearer by explicitly selecting relevant fields.
+
+    **Type Flow:**
+    - Single key: Dict[str, Any] → key selection → Any (single value)
+    - Multiple keys: Dict[str, Any] → key selection → Dict[str, Any] (subset)
+    
+    **Behavior Details:**
+    - If keys is a single string, returns the value for that key (or None if missing)
+    - If keys is a list of strings, returns a dict with only those keys present
+      in the input
+    - Missing keys are silently omitted (no KeyError raised)
+    - If no specified keys are found in input, returns None
+
+    **Use Cases:**
+    - Filtering unnecessary data before passing to LLMs (reduce token count)
+    - Selecting relevant fields for specific processing steps
+    - Extracting specific outputs from complex chain results
+    - Preparing focused inputs for downstream Runnables that expect specific keys
+
+    **Integration in LCEL Chains:**
+    RunnablePick is commonly used after operations that produce large dicts
+    (like RunnableParallel or document retrievers) to extract only the fields
+    needed for subsequent steps.
+
     Example:
         ```python
         from langchain_core.runnables.passthrough import RunnablePick
@@ -693,6 +1237,8 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
 
         print(output_data)  # Output: {'name': 'John', 'age': 30}
         ```
+
+    Source: libs/core/langchain_core/runnables/passthrough.py:920
     """
 
     keys: str | list[str]
@@ -747,6 +1293,18 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         self,
         value: dict[str, Any],
     ) -> dict[str, Any]:
+        """Internal method to pick specified keys from the input dict.
+
+        Args:
+            value: Input dictionary to pick keys from.
+
+        Returns:
+            dict[str, Any] | Any | None: Picked value(s). If keys is a single
+                string, returns the value for that key. If keys is a list,
+                returns a dict with only those keys. Returns None if no keys found.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:1029
+        """
         return self._pick(value)
 
     @override
@@ -756,12 +1314,69 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Invoke the key picker, extracting specified keys from input dict.
+
+        Extracts only the keys specified during initialization from the input
+        dictionary. This is useful for filtering data before passing to downstream
+        Runnables.
+
+        Args:
+            input: Input dictionary to extract keys from. Must be a dict[str, Any].
+            config: Optional configuration for callbacks, tags, and metadata.
+                Used to track execution in LangSmith or custom callback handlers.
+            **kwargs: Additional keyword arguments (currently unused).
+
+        Returns:
+            dict[str, Any] | Any | None: Extracted value(s) based on keys:
+                - If self.keys is a single string: returns the value for that key
+                  (or None if key not in input)
+                - If self.keys is a list: returns a dict containing only the
+                  specified keys that exist in input
+                - If none of the specified keys are found: returns None
+
+        Raises:
+            ValueError: If input is not a dict instance. RunnablePick requires
+                dict inputs to perform key selection.
+
+        Example:
+            ```python
+            from langchain_core.runnables.passthrough import RunnablePick
+
+            # Pick single key
+            picker_single = RunnablePick(keys="name")
+            result = picker_single.invoke({"name": "Alice", "age": 30})
+            # Returns: "Alice"
+
+            # Pick multiple keys
+            picker_multi = RunnablePick(keys=["name", "age"])
+            result = picker_multi.invoke({"name": "Alice", "age": 30, "city": "NYC"})
+            # Returns: {'name': 'Alice', 'age': 30}
+
+            # Missing keys are omitted
+            result = picker_multi.invoke({"name": "Bob"})
+            # Returns: {'name': 'Bob'}
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:1311
+        """
         return self._call_with_config(self._invoke, input, config, **kwargs)
 
     async def _ainvoke(
         self,
         value: dict[str, Any],
     ) -> dict[str, Any]:
+        """Internal async method to pick specified keys from the input dict.
+
+        Args:
+            value: Input dictionary to pick keys from.
+
+        Returns:
+            dict[str, Any] | Any | None: Picked value(s). If keys is a single
+                string, returns the value for that key. If keys is a list,
+                returns a dict with only those keys. Returns None if no keys found.
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:1089
+        """
         return self._pick(value)
 
     @override
@@ -771,6 +1386,52 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """Asynchronously invoke the key picker, extracting specified keys.
+
+        Asynchronously extracts only the keys specified during initialization from
+        the input dictionary. This is useful for filtering data in async chains
+        before passing to downstream Runnables.
+
+        Args:
+            input: Input dictionary to extract keys from. Must be a dict[str, Any].
+            config: Optional configuration for callbacks, tags, and metadata.
+                Used to track execution in LangSmith or custom callback handlers.
+            **kwargs: Additional keyword arguments (currently unused).
+
+        Returns:
+            dict[str, Any] | Any | None: Extracted value(s) based on keys:
+                - If self.keys is a single string: returns the value for that key
+                  (or None if key not in input)
+                - If self.keys is a list: returns a dict containing only the
+                  specified keys that exist in input
+                - If none of the specified keys are found: returns None
+
+        Raises:
+            ValueError: If input is not a dict instance. RunnablePick requires
+                dict inputs to perform key selection.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables.passthrough import RunnablePick
+
+            # Pick single key
+            picker_single = RunnablePick(keys="name")
+            result = await picker_single.ainvoke({"name": "Alice", "age": 30})
+            # Returns: "Alice"
+
+            # Pick multiple keys in async chain
+            picker_multi = RunnablePick(keys=["name", "age"])
+            result = await picker_multi.ainvoke({
+                "name": "Alice",
+                "age": 30,
+                "city": "NYC"
+            })
+            # Returns: {'name': 'Alice', 'age': 30}
+            ```
+
+        Source: libs/core/langchain_core/runnables/passthrough.py:1383
+        """
         return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
 
     def _transform(

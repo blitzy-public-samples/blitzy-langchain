@@ -1,0 +1,76 @@
+# Requirements for basic_chains examples
+# 
+# Purpose: Required dependencies for running the basic LangChain chain examples.
+# These examples demonstrate fundamental chain composition patterns including
+# simple LLM chains, prompt templates, LCEL composition, and sequential chains.
+#
+# Installation:
+#   pip install -r requirements.txt
+#   OR
+#   uv pip install -r requirements.txt
+#
+# Python Version Requirement: >=3.10,<4.0.0
+#
+# Source: Agent Action Plan section 0.6.1 Documentation Dependencies
+# Source: libs/core/pyproject.toml
+# Source: libs/langchain/pyproject.toml
+# Source: libs/partners/openai/pyproject.toml
+
+# ============================================================================
+# CORE LANGCHAIN PACKAGES
+# ============================================================================
+
+# langchain-core: Core LangChain abstractions including Runnable protocol,
+# Message types (HumanMessage, AIMessage, SystemMessage), LCEL composition,
+# and foundational interfaces for chains, prompts, and output parsers
+langchain-core>=1.0.1,<2.0.0
+
+# langchain-classic: Classic chain implementations including LLMChain,
+# SequentialChain, SimpleSequentialChain, and legacy chain utilities
+# for building traditional LangChain applications
+langchain-classic>=1.0.0,<2.0.0
+
+# ============================================================================
+# LLM PROVIDER INTEGRATIONS
+# ============================================================================
+
+# langchain-openai: OpenAI LLM and ChatOpenAI integration for GPT models.
+# Provides OpenAI() and ChatOpenAI() classes for interacting with
+# OpenAI's API endpoints (GPT-4, GPT-3.5-turbo, etc.)
+langchain-openai>=1.0.1,<2.0.0
+
+# ============================================================================
+# DATA VALIDATION AND TYPE CHECKING
+# ============================================================================
+
+# pydantic: Data validation and settings management using Python type hints.
+# Required for LangChain's model validation, input/output schemas,
+# and type-safe data structures. Version 2.x required for LangChain compatibility.
+pydantic>=2.7.4,<3.0.0
+
+# typing-extensions: Backport of typing features for Python versions <3.13.
+# Provides enhanced type hint support including ParamSpec, Concatenate,
+# and other modern typing constructs used throughout LangChain
+typing-extensions>=4.7.0,<5.0.0
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+# python-dotenv: Environment variable management for loading API keys
+# and configuration from .env files. Essential for securely managing
+# OPENAI_API_KEY and other credentials without hardcoding
+python-dotenv>=1.0.0,<2.0.0
+
+# ============================================================================
+# OPTIONAL TESTING DEPENDENCIES
+# ============================================================================
+# Uncomment the following lines if you want to run validation tests
+# on the example files or develop additional examples with test coverage
+
+# pytest: Testing framework for running example validation tests
+# pytest>=8.0.0,<9.0.0
+
+# pytest-asyncio: Pytest plugin for testing async example code
+# Enables testing of async chain execution patterns (ainvoke, astream)
+# pytest-asyncio>=0.21.1,<1.0.0

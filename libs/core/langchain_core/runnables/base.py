@@ -1,4 +1,70 @@
-"""Base classes and utilities for `Runnable`s."""
+"""Base classes and utilities for `Runnable`s.
+
+This module defines the core Runnable protocol and LCEL (LangChain Expression Language)
+composition system that enables type-safe, composable chain building in LangChain.
+
+Core Abstractions
+=================
+
+**Runnable Protocol**: The `Runnable` class is an abstract base class that defines a
+    standard interface for units of work that can be invoked, batched, streamed, and
+    composed. All LangChain components (prompts, models, retrievers, tools, chains)
+    implement this protocol, enabling uniform interaction patterns.
+
+**LCEL Composition**: The LangChain Expression Language provides a declarative syntax
+    for composing Runnables using the pipe operator (|). Type-safe composition ensures
+    that the output type of one Runnable matches the input type of the next, with
+    compile-time verification through Python's type system.
+
+**Generic Type Parameters**: Runnables are parameterized with Generic[Input, Output]
+    type variables, enabling explicit type flow documentation and IDE autocomplete
+    support throughout composed chains.
+
+Key Features
+============
+
+**Unified Execution Interface**:
+    - invoke/ainvoke: Single input transformation (sync/async)
+    - batch/abatch: Multiple input transformation with parallelization
+    - stream/astream: Streaming output generation as it's produced
+    - All methods accept RunnableConfig for runtime configuration
+
+**Automatic Optimization**:
+    - Batch operations use ThreadPoolExecutor for parallel execution
+    - Async operations leverage asyncio.gather for concurrency
+    - Streaming support for token-by-token output from LLMs
+
+**Configuration Propagation**: RunnableConfig flows through chain execution,
+    enabling callbacks, tags, metadata, max_concurrency limits, and recursion
+    protection at any level of the composition hierarchy.
+
+Type Flow Example
+=================
+
+LCEL composition creates type-safe transformation pipelines:
+
+    ```python
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+    
+    # Type flow: Dict[str,str] → PromptTemplate → List[BaseMessage]
+    prompt = ChatPromptTemplate.from_messages([...])
+    
+    # Type flow: List[BaseMessage] → ChatModel → AIMessage
+    model = ChatOpenAI()
+    
+    # Type flow: AIMessage → StrOutputParser → str
+    parser = StrOutputParser()
+    
+    # Composed chain type flow: Dict[str,str] → str
+    chain = prompt | model | parser
+    
+    # Type-safe invocation with autocomplete
+    result: str = chain.invoke({"input": "hello"})
+    ```
+
+Source: libs/core/langchain_core/runnables/base.py:1-6055
+"""
 
 from __future__ import annotations
 
@@ -122,6 +188,21 @@ Other = TypeVar("Other")
 class Runnable(ABC, Generic[Input, Output]):
     """A unit of work that can be invoked, batched, streamed, transformed and composed.
 
+    Type Parameters
+    ===============
+
+    **Input**: The type of input this Runnable accepts. Used for type checking and
+        IDE autocomplete when composing chains. Can be any Python type including:
+        - Primitive types: str, int, dict, list
+        - Pydantic models: BaseModel subclasses
+        - Message types: List[BaseMessage], AIMessage, HumanMessage
+        - Complex types: Dict[str, Any], List[Dict[str, Any]]
+
+    **Output**: The type of output this Runnable produces. Must be type-compatible
+        with the Input type of any Runnable that follows in a composition chain.
+        LCEL enforces type safety at composition time: Runnable[A,B] | Runnable[B,C]
+        produces Runnable[A,C].
+
     Key Methods
     ===========
 
@@ -134,11 +215,16 @@ class Runnable(ABC, Generic[Input, Output]):
     Built-in optimizations:
 
     - **Batch**: By default, batch runs invoke() in parallel using a thread pool
-        executor. Override to optimize batching.
+        executor (ThreadPoolExecutor). Override to optimize batching for APIs that
+        support native batch endpoints.
 
-    - **Async**: Methods with `'a'` suffix are asynchronous. By default, they execute
-        the sync counterpart using asyncio's thread pool.
-        Override for native async.
+    - **Async**: Methods with `'a'` prefix are asynchronous. By default, they execute
+        the sync counterpart using asyncio's default executor (run_in_executor).
+        Override for native async implementations that leverage asyncio primitives.
+
+    - **Streaming**: Default implementations yield the complete output from invoke().
+        Override stream/astream for token-by-token streaming from LLMs or chunked
+        streaming from retrievers.
 
     All methods accept an optional config argument, which can be used to configure
     execution, add tags and metadata for tracing and debugging etc.
@@ -151,7 +237,7 @@ class Runnable(ABC, Generic[Input, Output]):
     ====================
 
     The LangChain Expression Language (LCEL) is a declarative way to compose
-    `Runnable` objectsinto chains.
+    `Runnable` objects into chains.
     Any chain constructed this way will automatically have sync, async, batch, and
     streaming support.
 
@@ -165,6 +251,36 @@ class Runnable(ABC, Generic[Input, Output]):
     to each. Construct it using a dict literal within a sequence or by passing a
     dict to `RunnableParallel`.
 
+    LCEL Type Safety
+    ----------------
+
+    The pipe operator (|) enforces type compatibility between composed Runnables:
+
+    **Type Composition Rule**: When composing Runnable[A,B] | Runnable[B,C], the
+        output type of the first Runnable (B) must match the input type of the second
+        Runnable (B). The resulting RunnableSequence has type Runnable[A,C].
+
+    **Type Flow Example**:
+        ```python
+        # Runnable[Dict[str,str], List[BaseMessage]]
+        prompt: ChatPromptTemplate = ChatPromptTemplate.from_messages([...])
+        
+        # Runnable[List[BaseMessage], AIMessage]
+        model: ChatOpenAI = ChatOpenAI()
+        
+        # Runnable[AIMessage, str]
+        parser: StrOutputParser = StrOutputParser()
+        
+        # Type-safe composition: Runnable[Dict[str,str], str]
+        chain = prompt | model | parser
+        
+        # Type error if incompatible: Dict[str,str] cannot pipe to AIMessage
+        # invalid = prompt | parser  # Type checker error!
+        ```
+
+    **Type Coercion**: The `coerce_to_runnable()` function automatically converts
+        callables and mappings to Runnables, enabling flexible composition patterns
+        while maintaining type safety.
 
     For example,
 
@@ -613,16 +729,125 @@ class Runnable(ABC, Generic[Input, Output]):
         | Callable[[Any], Other]
         | Mapping[str, Runnable[Any, Other] | Callable[[Any], Other] | Any],
     ) -> RunnableSerializable[Input, Other]:
-        """Runnable "or" operator.
+        """LCEL pipe operator for composing Runnables into sequences.
 
-        Compose this `Runnable` with another object to create a
-        `RunnableSequence`.
+        Compose this `Runnable` with another object to create a type-safe
+        `RunnableSequence`. This is the foundation of LCEL (LangChain Expression
+        Language) composition syntax.
+
+        Type Flow Semantics
+        ===================
+
+        When composing Runnable[A,B] | Runnable[B,C], the resulting RunnableSequence
+        has type Runnable[A,C]. The output type of the left operand (B) flows as
+        the input type to the right operand (B), and the overall transformation
+        maps from the left's input type (A) to the right's output type (C).
+
+        Type Composition Examples:
+            ```python
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import StrOutputParser
+            from langchain_openai import ChatOpenAI
+            
+            # Type: Runnable[Dict[str,str], List[BaseMessage]]
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "You are a helpful assistant"),
+                ("user", "{input}")
+            ])
+            
+            # Type: Runnable[List[BaseMessage], AIMessage]
+            model = ChatOpenAI()
+            
+            # Type: Runnable[AIMessage, str]
+            parser = StrOutputParser()
+            
+            # Composition type flow:
+            # Step 1: prompt | model
+            #   → Runnable[Dict[str,str], List[BaseMessage]] | 
+            #      Runnable[List[BaseMessage], AIMessage]
+            #   → Runnable[Dict[str,str], AIMessage]
+            #
+            # Step 2: (prompt | model) | parser
+            #   → Runnable[Dict[str,str], AIMessage] | Runnable[AIMessage, str]
+            #   → Runnable[Dict[str,str], str]
+            chain = prompt | model | parser
+            
+            # Type-safe invocation: input is Dict[str,str], output is str
+            result: str = chain.invoke({"input": "hello world"})
+            ```
+
+        Type Coercion
+        =============
+
+        The `coerce_to_runnable()` function automatically converts non-Runnable
+        objects into Runnables, enabling flexible composition:
+
+        - **Callables**: Functions/lambdas become RunnableLambda instances
+        - **Mappings**: Dicts become RunnableParallel instances for parallel execution
+        - **Iterators/AsyncIterators**: Transform functions become RunnableGenerator
+            instances
+
+        Coercion Examples:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            
+            # Function coercion to RunnableLambda
+            chain = RunnableLambda(str.upper) | (lambda x: x + "!")
+            #        Runnable[str,str]         | Callable[[str], str]
+            #                                    ↓ (coerced to RunnableLambda)
+            #        Runnable[str,str]         | Runnable[str,str]
+            #                                    ↓
+            #                          Runnable[str,str]
+            
+            # Dict coercion to RunnableParallel
+            chain = RunnableLambda(lambda x: x) | {
+                "upper": str.upper,
+                "lower": str.lower
+            }
+            #        Runnable[str,str]          | Mapping[str, Callable]
+            #                                     ↓ (coerced to RunnableParallel)
+            #        Runnable[str,str]          | Runnable[str, Dict[str,str]]
+            #                                     ↓
+            #                          Runnable[str, Dict[str,str]]
+            ```
 
         Args:
-            other: Another `Runnable` or a `Runnable`-like object.
+            other: Another `Runnable` or a `Runnable`-like object to compose with.
+                Accepted types:
+                - Runnable[Any, Other]: Any Runnable instance
+                - Callable[[Iterator[Any]], Iterator[Other]]: Streaming transform
+                - Callable[[AsyncIterator[Any]], AsyncIterator[Other]]: Async streaming
+                - Callable[[Any], Other]: Synchronous transform function
+                - Mapping[str, ...]: Dictionary for parallel execution
 
         Returns:
-            A new `Runnable`.
+            A new RunnableSequence with type Runnable[Input, Other], where Input
+            is this Runnable's input type and Other is the composed Runnable's
+            output type.
+
+        Raises:
+            TypeError: If the output type of this Runnable is incompatible with
+                the input type expected by the other Runnable (runtime validation
+                may detect type mismatches that static type checkers miss).
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            
+            # Create simple Runnables
+            add_one = RunnableLambda(lambda x: x + 1)      # Runnable[int, int]
+            multiply_two = RunnableLambda(lambda x: x * 2)  # Runnable[int, int]
+            to_string = RunnableLambda(str)                # Runnable[int, str]
+            
+            # Compose using pipe operator
+            chain = add_one | multiply_two | to_string
+            # Type flow: int → (add 1) → int → (multiply 2) → int → (to_string) → str
+            # Result type: Runnable[int, str]
+            
+            result = chain.invoke(5)  # "12"
+            ```
+
+        Source: libs/core/langchain_core/runnables/base.py:608-627
         """
         return RunnableSequence(self, coerce_to_runnable(other))
 
@@ -634,16 +859,104 @@ class Runnable(ABC, Generic[Input, Output]):
         | Callable[[Other], Any]
         | Mapping[str, Runnable[Other, Any] | Callable[[Other], Any] | Any],
     ) -> RunnableSerializable[Other, Output]:
-        """Runnable "reverse-or" operator.
+        """LCEL reverse pipe operator for right-to-left composition.
 
-        Compose this `Runnable` with another object to create a
-        `RunnableSequence`.
+        Compose another object with this `Runnable` to create a type-safe
+        `RunnableSequence`. This operator handles the case where a non-Runnable
+        object (like a function or dict) is used on the left side of the pipe
+        operator.
+
+        Type Flow Semantics
+        ===================
+
+        When composing other | Runnable[A,B], the `other` object is coerced to a
+        Runnable (if necessary) and placed before `self` in the sequence. The resulting
+        RunnableSequence has type Runnable[Other_Input, B], where Other_Input is the
+        input type of the coerced `other` Runnable, and B is this Runnable's output type.
+
+        Reverse Operator Invocation
+        ============================
+
+        Python invokes __ror__ when the left operand doesn't define __or__ or when
+        __or__ returns NotImplemented. This commonly occurs when composing:
+        - Non-Runnable callables (functions, lambdas) with Runnables
+        - Dict literals with Runnables
+        - Any object that doesn't implement __or__
+
+        Usage Scenarios:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            from langchain_core.output_parsers import StrOutputParser
+            
+            # Scenario 1: Function on left side (invokes __ror__ on parser)
+            def process_text(x: str) -> str:
+                return x.upper()
+            
+            parser = StrOutputParser()
+            # process_text.__or__(parser) → NotImplemented
+            # parser.__ror__(process_text) → RunnableSequence(process_text, parser)
+            chain = process_text | parser
+            
+            # Scenario 2: Dict literal on left side (invokes __ror__ on lambda)
+            transform = RunnableLambda(lambda x: x["result"])
+            # dict.__or__(transform) → NotImplemented
+            # transform.__ror__({"key": "value"}) → RunnableSequence(dict, transform)
+            chain = {"key": "value"} | transform
+            
+            # Scenario 3: Runnable on left side (uses __or__, not __ror__)
+            lambda1 = RunnableLambda(lambda x: x + 1)
+            lambda2 = RunnableLambda(lambda x: x * 2)
+            # lambda1.__or__(lambda2) → RunnableSequence (doesn't use __ror__)
+            chain = lambda1 | lambda2
+            ```
+
+        Type Coercion in Reverse Composition
+        =====================================
+
+        The `coerce_to_runnable()` function converts the left operand before sequencing:
+        - **Callables**: Become RunnableLambda[Other, Any]
+        - **Mappings**: Become RunnableParallel[Other, Dict[str, Any]]
+        - **Existing Runnables**: Pass through unchanged
 
         Args:
-            other: Another `Runnable` or a `Runnable`-like object.
+            other: Another `Runnable` or a `Runnable`-like object to place before
+                this Runnable in the sequence. Accepted types:
+                - Runnable[Other, Any]: Any Runnable instance
+                - Callable[[Iterator[Other]], Iterator[Any]]: Streaming transform
+                - Callable[[AsyncIterator[Other]], AsyncIterator[Any]]: Async streaming
+                - Callable[[Other], Any]: Synchronous transform function
+                - Mapping[str, ...]: Dictionary for parallel execution
 
         Returns:
-            A new `Runnable`.
+            A new RunnableSequence with type Runnable[Other, Output], where Other
+            is the input type of the coerced `other` Runnable and Output is this
+            Runnable's output type.
+
+        Raises:
+            TypeError: If the output type of the coerced `other` Runnable is
+                incompatible with this Runnable's input type.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            
+            # Define a Runnable that expects int input
+            multiply_two = RunnableLambda(lambda x: x * 2)  # Runnable[int, int]
+            
+            # Compose with a function on the left (invokes __ror__)
+            def add_one(x: int) -> int:
+                return x + 1
+            
+            chain = add_one | multiply_two
+            # Python calls: multiply_two.__ror__(add_one)
+            # Result: RunnableSequence(RunnableLambda(add_one), multiply_two)
+            # Type flow: int → (add 1) → int → (multiply 2) → int
+            # Result type: Runnable[int, int]
+            
+            result = chain.invoke(5)  # 12
+            ```
+
+        Source: libs/core/langchain_core/runnables/base.py:629-648
         """
         return RunnableSequence(coerce_to_runnable(other), self)
 
@@ -815,16 +1128,118 @@ class Runnable(ABC, Generic[Input, Output]):
     ) -> Output:
         """Transform a single input into an output.
 
+        This is the core execution method for Runnables. It performs a synchronous
+        transformation from the Input type to the Output type. All Runnable subclasses
+        must implement this method.
+
+        Type Flow
+        =========
+
+        The invoke method enforces the Generic[Input, Output] type contract defined
+        in the Runnable class signature. The Input type parameter determines what
+        types are accepted, and the Output type parameter determines what is returned.
+
         Args:
-            input: The input to the `Runnable`.
-            config: A config to use when invoking the `Runnable`.
-                The config supports standard keys like `'tags'`, `'metadata'` for
-                tracing purposes, `'max_concurrency'` for controlling how much work to
-                do in parallel, and other keys. Please refer to the `RunnableConfig`
-                for more details.
+            input: The input to the `Runnable`. Type must match the Input generic
+                type parameter. For example:
+                - Dict[str, Any] for prompt templates
+                - List[BaseMessage] for chat models
+                - str for LLMs and output parsers
+                - Any Pydantic model for structured input chains
+            
+            config: Optional configuration for invoking the `Runnable`. Controls
+                execution behavior, tracing, and callbacks. If None, uses default
+                configuration. Supported configuration keys:
+
+                **Tracing and Debugging**:
+                - `callbacks`: Union[List[BaseCallbackHandler], CallbackManager] -
+                    Callback handlers for lifecycle events. Handlers receive events
+                    like on_chain_start, on_chain_end, on_llm_start, on_llm_new_token.
+                    Child Runnables inherit callbacks from parent config.
+                
+                - `tags`: List[str] - String tags for filtering and organizing runs
+                    in tracing systems. Tags propagate to child Runnables.
+                    Example: ["production", "user-query", "version-2"]
+                
+                - `metadata`: Dict[str, Any] - Custom metadata for tracing and
+                    debugging. Useful for tracking user_id, session_id, experiment_id.
+                    Metadata propagates to child Runnables.
+                    Example: {"user_id": "123", "session": "abc"}
+                
+                - `run_name`: str - Custom name for this run in tracing systems.
+                    Overrides the default name derived from the Runnable class name.
+                
+                - `run_id`: Optional[UUID] - Explicit run ID for distributed tracing.
+                    If not provided, a new UUID is generated automatically.
+
+                **Execution Control**:
+                - `max_concurrency`: Optional[int] - Maximum number of concurrent
+                    calls to allow for parallel execution in batch operations and
+                    RunnableParallel compositions. Limits ThreadPoolExecutor workers.
+                    If None, uses system default (typically CPU count * 5).
+                
+                - `recursion_limit`: int - Maximum recursion depth for nested Runnable
+                    invocations. Prevents infinite recursion in circular chain
+                    compositions. Default: 25. Raises RecursionError if exceeded.
+
+                **Runtime Configuration**:
+                - `configurable`: Dict[str, Any] - Runtime configuration for Runnables
+                    that use configurable_fields() or configurable_alternatives().
+                    Allows swapping implementations or parameters at runtime.
+                    Example: {"llm": "gpt-4", "temperature": 0.7}
+
+            **kwargs: Additional keyword arguments passed to the Runnable's
+                implementation. Usage varies by Runnable subclass. Common patterns:
+                - stop: List[str] for LLMs (stop sequences)
+                - functions: List[Dict] for function calling models
+                - Custom parameters for specialized Runnables
 
         Returns:
-            The output of the `Runnable`.
+            The output of the `Runnable`. Type matches the Output generic type
+            parameter. The transformation from Input → Output is deterministic for
+            a given input and config (though LLMs may introduce non-determinism).
+
+        Raises:
+            ValueError: If input doesn't match expected Input type schema.
+            RecursionError: If recursion_limit is exceeded during execution.
+            CallbackError: If a callback handler raises an exception and
+                error handling is not configured to suppress it.
+            Any exception raised by the Runnable's implementation logic.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            
+            # Simple Runnable with type annotations
+            def process_text(text: str) -> str:
+                return text.upper()
+            
+            runnable = RunnableLambda(process_text)
+            
+            # Basic invocation
+            result = runnable.invoke("hello")  # "HELLO"
+            
+            # Invocation with config for tracing
+            result = runnable.invoke(
+                "hello",
+                config={
+                    "tags": ["example", "uppercase"],
+                    "metadata": {"user_id": "123"},
+                    "callbacks": [ConsoleCallbackHandler()],
+                }
+            )
+            
+            # Invocation with runtime configuration
+            configurable_runnable = runnable.configurable_fields(
+                text=ConfigurableField(id="input_text")
+            )
+            result = configurable_runnable.invoke(
+                "default",
+                config={"configurable": {"input_text": "override"}}
+            )
+            ```
+
+        Source: libs/core/langchain_core/runnables/base.py:809-828
         """
 
     async def ainvoke(
@@ -833,18 +1248,125 @@ class Runnable(ABC, Generic[Input, Output]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Output:
-        """Transform a single input into an output.
+        """Asynchronously transform a single input into an output.
+
+        This is the async counterpart to invoke(). Default implementation runs the
+        synchronous invoke() method in an asyncio executor thread pool to avoid
+        blocking the event loop.
+
+        Subclasses should override this method if they have a native async
+        implementation that can leverage asyncio primitives for true concurrent
+        execution (e.g., aiohttp for HTTP requests, async database drivers, etc.).
+
+        When to Use ainvoke vs invoke
+        ==============================
+
+        **Use ainvoke when**:
+        - Running within an async context (async def function, asyncio event loop)
+        - Composing with other async operations (async API calls, async I/O)
+        - Building async web applications (FastAPI, Starlette, aiohttp servers)
+        - Handling concurrent requests where blocking would harm throughput
+
+        **Use invoke when**:
+        - Running in synchronous code without an event loop
+        - Simple scripts and notebooks where async complexity isn't needed
+        - Blocking execution is acceptable for your use case
+
+        Event Loop Considerations
+        =========================
+
+        - **Existing Event Loop**: If called from an already-running event loop
+          (e.g., in a FastAPI endpoint), ainvoke uses that loop automatically.
+        
+        - **No Event Loop**: If called from sync code, you must use asyncio.run():
+          ```python
+          import asyncio
+          result = asyncio.run(runnable.ainvoke(input))
+          ```
+        
+        - **Nested Event Loops**: Cannot call asyncio.run() from within a running
+          loop. Use await ainvoke() directly instead.
+
+        Default Implementation Behavior
+        ================================
+
+        The default implementation uses run_in_executor() which:
+        1. Gets an executor from the config (or creates a ThreadPoolExecutor)
+        2. Runs the synchronous invoke() in a thread pool
+        3. Awaits the thread completion without blocking the event loop
+        4. Returns the result to the async context
+
+        This provides async behavior but doesn't offer true parallelism for CPU-bound
+        operations due to Python's GIL (Global Interpreter Lock).
 
         Args:
-            input: The input to the `Runnable`.
-            config: A config to use when invoking the `Runnable`.
-                The config supports standard keys like `'tags'`, `'metadata'` for
-                tracing purposes, `'max_concurrency'` for controlling how much work to
-                do in parallel, and other keys. Please refer to the `RunnableConfig`
-                for more details.
+            input: The input to the `Runnable`. Type must match the Input generic
+                type parameter, same as for invoke().
+            
+            config: Optional configuration for invoking the `Runnable`. Supports
+                all the same keys as invoke(). See invoke() docstring for complete
+                config documentation. Additional async-specific considerations:
+
+                - `callbacks`: Async callback handlers (AsyncCallbackHandler subclasses)
+                  can be mixed with sync handlers. Async handlers' async methods are
+                  awaited, while sync handlers run in the executor.
+                
+                - `max_concurrency`: Controls concurrent execution in abatch() and
+                  RunnableParallel compositions using asyncio.gather() with a
+                  semaphore for limiting concurrency.
+
+            **kwargs: Additional keyword arguments passed to the Runnable's
+                implementation, same as invoke().
 
         Returns:
-            The output of the `Runnable`.
+            The output of the `Runnable`. Type matches the Output generic type
+            parameter. The result is identical to invoke() for the same input.
+
+        Raises:
+            ValueError: If input doesn't match expected Input type schema.
+            RecursionError: If recursion_limit is exceeded during execution.
+            asyncio.CancelledError: If the async operation is cancelled.
+            Any exception raised by the Runnable's implementation logic.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnableLambda
+            
+            # Define an async Runnable
+            async def async_process(text: str) -> str:
+                await asyncio.sleep(0.1)  # Simulate async I/O
+                return text.upper()
+            
+            runnable = RunnableLambda(async_process)
+            
+            # Usage in async context
+            async def main():
+                # Basic async invocation
+                result = await runnable.ainvoke("hello")  # "HELLO"
+                
+                # Async invocation with config
+                result = await runnable.ainvoke(
+                    "hello",
+                    config={
+                        "tags": ["async-example"],
+                        "callbacks": [AsyncCallbackHandler()],
+                    }
+                )
+                
+                # Concurrent invocations using asyncio.gather
+                results = await asyncio.gather(
+                    runnable.ainvoke("hello"),
+                    runnable.ainvoke("world"),
+                    runnable.ainvoke("async"),
+                )
+                print(results)  # ["HELLO", "WORLD", "ASYNC"]
+            
+            # Run from synchronous code
+            asyncio.run(main())
+            ```
+
+        Source: libs/core/langchain_core/runnables/base.py:830-849
         """
         return await run_in_executor(config, self.invoke, input, config, **kwargs)
 
@@ -856,25 +1378,137 @@ class Runnable(ABC, Generic[Input, Output]):
         return_exceptions: bool = False,
         **kwargs: Any | None,
     ) -> list[Output]:
-        """Default implementation runs invoke in parallel using a thread pool executor.
+        """Transform multiple inputs into outputs in parallel using a thread pool.
 
-        The default implementation of batch works well for IO bound runnables.
+        The default implementation runs invoke() in parallel using a ThreadPoolExecutor.
+        This works well for I/O-bound operations (API calls, database queries, file I/O)
+        but provides limited benefit for CPU-bound operations due to Python's GIL.
 
-        Subclasses must override this method if they can batch more efficiently;
-        e.g., if the underlying `Runnable` uses an API which supports a batch mode.
+        Subclasses should override this method if they can batch more efficiently,
+        particularly if the underlying API supports native batch endpoints (e.g.,
+        OpenAI batch API, database bulk inserts).
+
+        Parallelization Strategy
+        ========================
+
+        **ThreadPoolExecutor Execution**:
+        - Creates or reuses a ThreadPoolExecutor from config
+        - Submits invoke(input, config) tasks for each input
+        - max_workers determined by max_concurrency config (default: None = CPU count * 5)
+        - Uses executor.map() to maintain input order in output list
+
+        **Optimization for Single Input**:
+        - If len(inputs) == 1, directly calls invoke() without executor overhead
+        - Avoids thread creation and synchronization costs for trivial cases
+
+        **Configuration Per Input**:
+        - Accepts single RunnableConfig applied to all inputs, OR
+        - List of RunnableConfig with one config per input (must match len(inputs))
+        - Enables per-input tracing, callbacks, and custom metadata
 
         Args:
-            inputs: A list of inputs to the `Runnable`.
-            config: A config to use when invoking the `Runnable`. The config supports
-                standard keys like `'tags'`, `'metadata'` for
-                tracing purposes, `'max_concurrency'` for controlling how much work
-                to do in parallel, and other keys. Please refer to the
-                `RunnableConfig` for more details.
+            inputs: A list of inputs to the `Runnable`. Each input must match the
+                Input generic type parameter. Can be empty list (returns []).
+                Type: List[Input] where Input is the Runnable's input type.
+            
+            config: Configuration for invoking the `Runnable`. Can be:
+                - None: Uses default config for all inputs
+                - Single RunnableConfig: Applied to all inputs uniformly
+                - List[RunnableConfig]: One config per input, must have len(configs) == len(inputs)
+                
+                Key config parameters for batch execution:
+
+                **Parallelization Control**:
+                - `max_concurrency`: Optional[int] - Maximum number of concurrent
+                  invoke() calls. Controls ThreadPoolExecutor max_workers.
+                  - None (default): Uses ThreadPoolExecutor default (CPU count * 5)
+                  - 1: Sequential execution (no parallelism)
+                  - N > 1: Up to N concurrent invoke() calls
+                  Example: max_concurrency=10 limits to 10 parallel API calls
+
+                **Tracing** (per-input or shared):
+                - `tags`, `metadata`, `callbacks`: See invoke() for details
+                - When using list of configs, each input can have unique tracing
+
             return_exceptions: Whether to return exceptions instead of raising them.
-            **kwargs: Additional keyword arguments to pass to the `Runnable`.
+                - False (default): First exception encountered stops execution and
+                  is raised. Remaining inputs are not processed.
+                - True: Exceptions are caught and returned in the output list at
+                  the corresponding index. Allows processing to continue after errors.
+                  Output type becomes List[Union[Output, Exception]].
+            
+            **kwargs: Additional keyword arguments passed to each invoke() call.
+                Same kwargs are used for all inputs.
 
         Returns:
-            A list of outputs from the `Runnable`.
+            A list of outputs from the `Runnable`. Order matches input order.
+            - If return_exceptions=False: List[Output]
+            - If return_exceptions=True: List[Union[Output, Exception]]
+
+        Raises:
+            ValueError: If config is a list with len(config) != len(inputs).
+            Any exception from invoke() if return_exceptions=False.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            import time
+            
+            def slow_process(x: int) -> int:
+                time.sleep(0.1)  # Simulate I/O delay
+                return x * 2
+            
+            runnable = RunnableLambda(slow_process)
+            
+            # Basic batch execution (parallel)
+            results = runnable.batch([1, 2, 3, 4, 5])
+            # Executes in ~0.1s with parallelism vs ~0.5s sequential
+            # Results: [2, 4, 6, 8, 10]
+            
+            # Limit concurrency
+            results = runnable.batch(
+                [1, 2, 3, 4, 5],
+                config={"max_concurrency": 2}  # Only 2 concurrent calls
+            )
+            
+            # Per-input configuration
+            results = runnable.batch(
+                [1, 2, 3],
+                config=[
+                    {"tags": ["input-1"]},
+                    {"tags": ["input-2"]},
+                    {"tags": ["input-3"]},
+                ]
+            )
+            
+            # Error handling with return_exceptions
+            def buggy_process(x: int) -> int:
+                if x == 2:
+                    raise ValueError("Invalid input")
+                return x * 2
+            
+            buggy_runnable = RunnableLambda(buggy_process)
+            results = buggy_runnable.batch(
+                [1, 2, 3],
+                return_exceptions=True
+            )
+            # Results: [2, ValueError("Invalid input"), 6]
+            ```
+
+        Performance Considerations
+        ==========================
+
+        **When Batch is Efficient**:
+        - I/O-bound operations (HTTP requests, database queries)
+        - High-latency operations that benefit from parallelism
+        - APIs without native batch endpoints
+
+        **When to Override batch()**:
+        - API has native batch endpoint (send all inputs in one request)
+        - Can aggregate inputs for more efficient processing
+        - Need different parallelization strategy (asyncio, multiprocessing)
+
+        Source: libs/core/langchain_core/runnables/base.py:851-898
         """
         if not inputs:
             return []
@@ -988,26 +1622,166 @@ class Runnable(ABC, Generic[Input, Output]):
         return_exceptions: bool = False,
         **kwargs: Any | None,
     ) -> list[Output]:
-        """Default implementation runs `ainvoke` in parallel using `asyncio.gather`.
+        """Asynchronously transform multiple inputs into outputs with concurrency control.
 
-        The default implementation of `batch` works well for IO bound runnables.
+        The default implementation runs ainvoke() in parallel using asyncio.gather()
+        with optional concurrency limiting via semaphores. This works well for I/O-bound
+        async operations (async HTTP clients, async database drivers, async file I/O).
 
-        Subclasses must override this method if they can batch more efficiently;
-        e.g., if the underlying `Runnable` uses an API which supports a batch mode.
+        Subclasses should override this method if they can batch more efficiently,
+        particularly if the underlying async API supports native batch endpoints.
+
+        Async Parallelization Strategy
+        ===============================
+
+        **gather_with_concurrency Execution**:
+        - Uses asyncio.gather() to run multiple ainvoke() coroutines concurrently
+        - Applies asyncio.Semaphore to limit max_concurrency if specified
+        - All coroutines start immediately, semaphore controls active execution
+        - Maintains input order in output list (gather preserves order)
+
+        **Concurrency Control**:
+        - max_concurrency=None: No limit, all coroutines run concurrently (subject
+          to event loop and system limits)
+        - max_concurrency=N: At most N coroutines execute simultaneously, others
+          wait on semaphore acquisition
+        - Prevents overwhelming external APIs or exhausting connection pools
+
+        **Configuration Per Input**:
+        - Accepts single RunnableConfig applied to all inputs, OR
+        - List of RunnableConfig with one config per input (must match len(inputs))
+
+        Async vs Sync Batch Comparison
+        ===============================
+
+        **abatch() - Async Parallelism**:
+        - Uses asyncio coroutines and event loop
+        - True concurrency for I/O-bound operations
+        - No GIL limitations for async I/O
+        - Requires async context (await keyword)
+        - More efficient for high-concurrency scenarios (100+ concurrent operations)
+
+        **batch() - Thread Parallelism**:
+        - Uses ThreadPoolExecutor and threads
+        - Limited by GIL for CPU-bound operations
+        - Works in synchronous code
+        - Thread creation overhead for each batch
+        - Better for moderate concurrency (10-50 operations)
 
         Args:
-            inputs: A list of inputs to the `Runnable`.
-            config: A config to use when invoking the `Runnable`.
-                The config supports standard keys like `'tags'`, `'metadata'` for
-                tracing purposes, `'max_concurrency'` for controlling how much work to
-                do in parallel, and other keys. Please refer to the `RunnableConfig`
-                for more details.
+            inputs: A list of inputs to the `Runnable`. Each input must match the
+                Input generic type parameter. Can be empty list (returns []).
+                Type: List[Input] where Input is the Runnable's input type.
+            
+            config: Configuration for invoking the `Runnable`. Can be:
+                - None: Uses default config for all inputs
+                - Single RunnableConfig: Applied to all inputs uniformly
+                - List[RunnableConfig]: One config per input, must have len(configs) == len(inputs)
+                
+                Key config parameters for async batch execution:
+
+                **Concurrency Control**:
+                - `max_concurrency`: Optional[int] - Maximum number of concurrent
+                  ainvoke() calls using asyncio.Semaphore.
+                  - None (default): No limit, all execute concurrently
+                  - 1: Sequential execution (defeats async benefits)
+                  - N > 1: Up to N concurrent ainvoke() calls
+                  Example: max_concurrency=50 prevents overwhelming API rate limits
+
+                **Async Callbacks**:
+                - `callbacks`: Can include AsyncCallbackHandler instances for
+                  async lifecycle events. Async handler methods are awaited.
+
             return_exceptions: Whether to return exceptions instead of raising them.
-            **kwargs: Additional keyword arguments to pass to the `Runnable`.
+                - False (default): First exception stops execution and propagates.
+                  asyncio.gather behavior: all pending coroutines are cancelled.
+                - True: Exceptions are caught and returned in output list at
+                  corresponding index. Processing continues after errors.
+                  Output type becomes List[Union[Output, Exception]].
+            
+            **kwargs: Additional keyword arguments passed to each ainvoke() call.
+                Same kwargs are used for all inputs.
 
         Returns:
-            A list of outputs from the `Runnable`.
+            A list of outputs from the `Runnable`. Order matches input order.
+            - If return_exceptions=False: List[Output]
+            - If return_exceptions=True: List[Union[Output, Exception]]
 
+        Raises:
+            ValueError: If config is a list with len(config) != len(inputs).
+            asyncio.CancelledError: If the abatch operation is cancelled.
+            Any exception from ainvoke() if return_exceptions=False.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnableLambda
+            
+            async def async_api_call(x: int) -> int:
+                await asyncio.sleep(0.1)  # Simulate async I/O
+                return x * 2
+            
+            runnable = RunnableLambda(async_api_call)
+            
+            async def main():
+                # Basic async batch execution (fully concurrent)
+                results = await runnable.abatch([1, 2, 3, 4, 5])
+                # Executes in ~0.1s (all concurrent) vs ~0.5s sequential
+                # Results: [2, 4, 6, 8, 10]
+                
+                # Limit concurrency to avoid overwhelming API
+                results = await runnable.abatch(
+                    list(range(100)),
+                    config={"max_concurrency": 10}  # Max 10 concurrent calls
+                )
+                
+                # Per-input async configuration
+                results = await runnable.abatch(
+                    [1, 2, 3],
+                    config=[
+                        {"tags": ["async-1"], "metadata": {"priority": "high"}},
+                        {"tags": ["async-2"], "metadata": {"priority": "medium"}},
+                        {"tags": ["async-3"], "metadata": {"priority": "low"}},
+                    ]
+                )
+                
+                # Error handling with return_exceptions
+                async def buggy_async(x: int) -> int:
+                    if x == 2:
+                        raise ValueError("Async error")
+                    await asyncio.sleep(0.05)
+                    return x * 2
+                
+                buggy_runnable = RunnableLambda(buggy_async)
+                results = await buggy_runnable.abatch(
+                    [1, 2, 3],
+                    return_exceptions=True
+                )
+                # Results: [2, ValueError("Async error"), 6]
+            
+            asyncio.run(main())
+            ```
+
+        Performance Considerations
+        ==========================
+
+        **When abatch() is Efficient**:
+        - High-concurrency async I/O operations (1000+ requests)
+        - Async HTTP clients (aiohttp, httpx)
+        - Async database drivers (asyncpg, motor)
+        - Operations with high I/O wait time and low CPU usage
+
+        **When to Override abatch()**:
+        - API has native async batch endpoint
+        - Can aggregate inputs for single async request
+        - Need specialized concurrency control (priority queues, rate limiting)
+
+        **Concurrency Tuning Guidelines**:
+        - Start with max_concurrency matching API rate limits
+        - Monitor connection pool exhaustion and adjust downward
+        - For rate-limited APIs: max_concurrency = rate_limit / (batch_size / batch_duration)
+
+        Source: libs/core/langchain_core/runnables/base.py:983-1027
         """
         if not inputs:
             return []
@@ -1110,18 +1884,153 @@ class Runnable(ABC, Generic[Input, Output]):
         config: RunnableConfig | None = None,
         **kwargs: Any | None,
     ) -> Iterator[Output]:
-        """Default implementation of `stream`, which calls `invoke`.
+        """Stream output from a single input as it's produced.
 
-        Subclasses must override this method if they support streaming output.
+        The default implementation calls invoke() and yields the complete output as
+        a single chunk. Subclasses should override this method if they support
+        incremental streaming (e.g., token-by-token from LLMs, chunk-by-chunk from
+        retrievers, or progressive results from generators).
+
+        When to Override stream()
+        =========================
+
+        **Override for True Streaming**:
+        - LLMs that support token-by-token streaming (OpenAI, Anthropic streaming APIs)
+        - Retrievers that yield documents incrementally
+        - Generators that produce results progressively
+        - Any operation where partial results are meaningful
+
+        **Keep Default Implementation When**:
+        - Output is atomic (single object, no meaningful partial results)
+        - Underlying API doesn't support streaming
+        - Streaming would add complexity without user benefit
+
+        Streaming vs Batch Execution
+        =============================
+
+        **stream() Characteristics**:
+        - Returns Iterator[Output] - pull-based iteration
+        - Caller controls consumption rate with next() or for loop
+        - Memory efficient for large outputs (yields chunks, doesn't buffer all)
+        - Enables real-time user feedback (progress bars, live updates)
+
+        **invoke() Characteristics**:
+        - Returns complete Output synchronously
+        - Entire result buffered in memory
+        - Simpler API for batch processing
+
+        Streaming Patterns
+        ==================
+
+        **Token Streaming (LLMs)**:
+            ```python
+            # LLM yields individual tokens
+            for token in llm.stream("Write a poem"):
+                print(token, end="", flush=True)
+            # Output: "The" "sun" "rises" "in" "the" "east" "."
+            ```
+
+        **Chunk Streaming (Retrievers)**:
+            ```python
+            # Retriever yields documents as they're fetched
+            for doc in retriever.stream("search query"):
+                process(doc)
+            # Enables pipelined processing without waiting for all docs
+            ```
+
+        **Composed Chain Streaming**:
+            ```python
+            # RunnableSequence streams through each stage
+            chain = prompt | model | parser
+            for chunk in chain.stream({"input": "hello"}):
+                print(chunk)
+            # StrOutputParser yields tokens from model stream
+            ```
 
         Args:
-            input: The input to the `Runnable`.
-            config: The config to use for the `Runnable`.
-            **kwargs: Additional keyword arguments to pass to the `Runnable`.
+            input: The input to the `Runnable`. Type must match the Input generic
+                type parameter, same as for invoke().
+            
+            config: Optional configuration for the `Runnable`. Supports all the
+                same keys as invoke(). See invoke() docstring for complete config
+                documentation. Streaming-specific considerations:
+
+                - `callbacks`: Callback handlers receive streaming events:
+                  - on_llm_new_token: Called for each token/chunk yielded
+                  - on_retriever_stream: Called for document chunks
+                  Enables real-time progress monitoring during streaming.
+
+            **kwargs: Additional keyword arguments passed to the Runnable's
+                implementation, same as invoke().
 
         Yields:
-            The output of the `Runnable`.
+            Chunks of the output as they're produced. The type and granularity of
+            chunks depends on the Runnable implementation:
+            - Default: Single complete Output (from invoke())
+            - LLMs: Individual tokens (str)
+            - Retrievers: Individual documents (Document)
+            - Parsers: Parsed chunks (varies by parser)
 
+            Note: Concatenating all yielded chunks should produce the same result
+            as invoke() for the same input.
+
+        Raises:
+            ValueError: If input doesn't match expected Input type schema.
+            Any exception raised by the Runnable's implementation logic.
+
+        Example:
+            ```python
+            from langchain_core.runnables import RunnableLambda
+            import time
+            
+            # Default implementation (non-streaming)
+            def process(x: int) -> int:
+                return x * 2
+            
+            runnable = RunnableLambda(process)
+            for chunk in runnable.stream(5):
+                print(chunk)  # Prints 10 once (complete output)
+            
+            # Custom streaming implementation
+            def streaming_generator(x: int) -> Iterator[int]:
+                for i in range(x):
+                    time.sleep(0.1)
+                    yield i
+            
+            streaming_runnable = RunnableLambda(streaming_generator)
+            for chunk in streaming_runnable.stream(5):
+                print(chunk)  # Prints 0, 1, 2, 3, 4 progressively
+            
+            # Streaming with callbacks for progress tracking
+            from langchain_core.callbacks import StreamingStdOutCallbackHandler
+            
+            for chunk in runnable.stream(
+                5,
+                config={"callbacks": [StreamingStdOutCallbackHandler()]}
+            ):
+                # Callback handler prints each chunk as it's yielded
+                process_chunk(chunk)
+            ```
+
+        Performance and Memory Benefits
+        ================================
+
+        **Memory Efficiency**:
+        - Streaming processes data incrementally without buffering entire output
+        - Critical for large outputs (long text generation, large document sets)
+        - Enables processing datasets larger than available memory
+
+        **Latency Benefits**:
+        - User sees first results immediately (time-to-first-token)
+        - Perceived performance improvement even if total time is similar
+        - Enables pipelined processing (downstream stages start before completion)
+
+        **User Experience**:
+        - Real-time progress indication (tokens appearing, progress bars)
+        - Ability to cancel long-running operations early
+        - Interactive applications feel more responsive
+
+        Source: libs/core/langchain_core/runnables/base.py:1107-1126
         """
         yield self.invoke(input, config, **kwargs)
 
@@ -1131,18 +2040,200 @@ class Runnable(ABC, Generic[Input, Output]):
         config: RunnableConfig | None = None,
         **kwargs: Any | None,
     ) -> AsyncIterator[Output]:
-        """Default implementation of `astream`, which calls `ainvoke`.
+        """Asynchronously stream output from a single input as it's produced.
 
-        Subclasses must override this method if they support streaming output.
+        The default implementation calls ainvoke() and yields the complete output as
+        a single chunk. Subclasses should override this method if they support
+        incremental async streaming (e.g., async token streaming from LLMs, async
+        document retrieval, or progressive async processing).
+
+        When to Override astream()
+        ==========================
+
+        **Override for Native Async Streaming**:
+        - Async LLMs with streaming support (OpenAI async streaming, Anthropic async)
+        - Async retrievers that yield documents incrementally
+        - Async generators that produce results progressively
+        - Any async operation where partial results can be streamed to caller
+
+        **Keep Default Implementation When**:
+        - No native async streaming support in underlying implementation
+        - Output is atomic with no meaningful incremental results
+        - Streaming complexity outweighs benefits
+
+        Async Streaming Characteristics
+        ================================
+
+        **AsyncIterator Protocol**:
+        - Returns AsyncIterator[Output] - async generator or async iterable
+        - Caller uses `async for` to consume chunks asynchronously
+        - Enables true concurrent streaming (multiple astream calls in parallel)
+        - Integrates with asyncio event loop for non-blocking iteration
+
+        **Event Loop Integration**:
+        - Chunks are yielded as they become available without blocking event loop
+        - Other async tasks can run while waiting for next chunk
+        - Ideal for real-time async applications (websockets, async web servers)
+
+        Async Streaming vs Sync Streaming
+        ==================================
+
+        **astream() - Async Streaming**:
+        - Uses `async for` syntax: `async for chunk in runnable.astream(input)`
+        - Non-blocking iteration (event loop continues during waits)
+        - Can run multiple concurrent streams efficiently
+        - Requires async context (async def function)
+        - Better for high-concurrency streaming scenarios
+
+        **stream() - Sync Streaming**:
+        - Uses regular `for` syntax: `for chunk in runnable.stream(input)`
+        - Blocking iteration (thread waits for each chunk)
+        - Simpler for synchronous code
+        - No event loop required
+
+        Async Streaming Patterns
+        =========================
+
+        **Async Token Streaming (LLMs)**:
+            ```python
+            async for token in llm.astream("Write a story"):
+                print(token, end="", flush=True)
+            # Yields tokens: "Once" "upon" "a" "time" ...
+            ```
+
+        **Concurrent Async Streaming**:
+            ```python
+            async def stream_all(inputs):
+                tasks = [llm.astream(inp) for inp in inputs]
+                async for task in asyncio.as_completed(tasks):
+                    async for chunk in await task:
+                        process(chunk)
+            # Multiple streams execute concurrently
+            ```
+
+        **Async Composed Chain Streaming**:
+            ```python
+            chain = prompt | async_model | async_parser
+            async for chunk in chain.astream({"input": "hello"}):
+                await async_process(chunk)
+            # Each stage streams asynchronously to the next
+            ```
 
         Args:
-            input: The input to the `Runnable`.
-            config: The config to use for the `Runnable`.
-            **kwargs: Additional keyword arguments to pass to the `Runnable`.
+            input: The input to the `Runnable`. Type must match the Input generic
+                type parameter, same as for ainvoke().
+            
+            config: Optional configuration for the `Runnable`. Supports all the
+                same keys as ainvoke(). See ainvoke() docstring for complete config
+                documentation. Async streaming-specific considerations:
+
+                - `callbacks`: Async callback handlers (AsyncCallbackHandler) are
+                  preferred for async streaming. Their async methods are awaited
+                  for each streamed chunk:
+                  - on_llm_new_token: Awaited for each token
+                  - on_chain_stream: Awaited for each chunk
+                  Enables non-blocking progress monitoring.
+
+            **kwargs: Additional keyword arguments passed to the Runnable's
+                implementation, same as ainvoke().
 
         Yields:
-            The output of the `Runnable`.
+            Chunks of the output as they're asynchronously produced. The type and
+            granularity of chunks depends on the Runnable implementation:
+            - Default: Single complete Output (from ainvoke())
+            - Async LLMs: Individual tokens (str) as they're generated
+            - Async Retrievers: Individual documents (Document) as they're fetched
+            - Async Parsers: Parsed chunks as parsing progresses
 
+            Note: Collecting all yielded chunks should produce the same result
+            as ainvoke() for the same input.
+
+        Raises:
+            ValueError: If input doesn't match expected Input type schema.
+            asyncio.CancelledError: If the streaming operation is cancelled.
+            Any exception raised by the Runnable's async implementation logic.
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_core.runnables import RunnableLambda
+            
+            # Default implementation (non-streaming)
+            async def async_process(x: int) -> int:
+                await asyncio.sleep(0.1)
+                return x * 2
+            
+            runnable = RunnableLambda(async_process)
+            
+            async def main():
+                async for chunk in runnable.astream(5):
+                    print(chunk)  # Prints 10 once (complete output after 0.1s)
+            
+            asyncio.run(main())
+            
+            # Custom async streaming implementation
+            async def async_streaming_generator(x: int):
+                for i in range(x):
+                    await asyncio.sleep(0.1)
+                    yield i
+            
+            streaming_runnable = RunnableLambda(async_streaming_generator)
+            
+            async def stream_example():
+                async for chunk in streaming_runnable.astream(5):
+                    print(chunk)  # Prints 0, 1, 2, 3, 4 progressively
+                    # Other async work can happen here
+                    await asyncio.sleep(0.05)
+            
+            asyncio.run(stream_example())
+            
+            # Concurrent async streaming with callbacks
+            from langchain_core.callbacks import AsyncCallbackHandler
+            
+            class ProgressHandler(AsyncCallbackHandler):
+                async def on_llm_new_token(self, token: str, **kwargs):
+                    await async_log(token)
+            
+            async def concurrent_streams():
+                # Run multiple streams concurrently
+                tasks = [
+                    runnable.astream(1, config={"callbacks": [ProgressHandler()]}),
+                    runnable.astream(2, config={"callbacks": [ProgressHandler()]}),
+                    runnable.astream(3, config={"callbacks": [ProgressHandler()]}),
+                ]
+                
+                for task in asyncio.as_completed(tasks):
+                    async for chunk in await task:
+                        print(chunk)
+            
+            asyncio.run(concurrent_streams())
+            ```
+
+        Performance and Concurrency Benefits
+        ====================================
+
+        **Async Concurrency**:
+        - Multiple astream() calls can execute truly concurrently
+        - Single event loop handles all streams without thread overhead
+        - Scales to hundreds or thousands of concurrent streams
+        - Ideal for real-time multi-user applications
+
+        **Non-Blocking Iteration**:
+        - Event loop remains responsive while waiting for chunks
+        - Other async tasks progress during streaming
+        - Better resource utilization than threaded streaming
+
+        **Memory Efficiency**:
+        - Same benefits as sync streaming (incremental processing)
+        - No buffering of complete output required
+        - Enables streaming large async results without memory exhaustion
+
+        **Latency Benefits**:
+        - Time-to-first-chunk same as sync streaming
+        - But multiple streams can make progress simultaneously
+        - Better overall throughput for concurrent streaming workloads
+
+        Source: libs/core/langchain_core/runnables/base.py:1128-1147
         """
         yield await self.ainvoke(input, config, **kwargs)
 
