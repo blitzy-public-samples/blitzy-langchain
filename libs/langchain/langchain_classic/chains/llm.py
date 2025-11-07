@@ -45,23 +45,87 @@ from langchain_classic.chains.base import Chain
 class LLMChain(Chain):
     """Chain to run queries against LLMs.
 
-    This class is deprecated. See below for an example implementation using
-    LangChain runnables:
+    ⚠️ **DEPRECATION WARNING**: This class is deprecated and will be removed in
+    version 1.0. Use LCEL (LangChain Expression Language) composition instead.
 
-        ```python
-        from langchain_core.output_parsers import StrOutputParser
-        from langchain_core.prompts import PromptTemplate
-        from langchain_openai import OpenAI
+    **Why LCEL is Better**:
+    - **Type Safety**: LCEL provides explicit type annotations and better IDE support
+    - **Easier Composition**: Natural pipe operator (|) for intuitive chain building
+    - **Streaming Support**: First-class support for streaming responses
+    - **Async-First Design**: Built with async/await patterns from the ground up
+    - **Better Error Messages**: Clear type mismatches and composition errors
 
-        prompt_template = "Tell me a {adjective} joke"
-        prompt = PromptTemplate(input_variables=["adjective"], template=prompt_template)
-        model = OpenAI()
-        chain = prompt | model | StrOutputParser()
+    **Migration Guide - Side-by-Side Comparison**:
 
-        chain.invoke("your adjective here")
-        ```
+    1. **Simple Prompt + LLM Composition**:
+       ```python
+       # DEPRECATED: LLMChain approach
+       from langchain_classic.chains import LLMChain
+       from langchain_core.prompts import PromptTemplate
+       from langchain_openai import OpenAI
 
-    Example:
+       prompt = PromptTemplate.from_template("Tell me a {adjective} joke")
+       chain = LLMChain(llm=OpenAI(), prompt=prompt)
+       result = chain.invoke({"adjective": "funny"})["text"]
+
+       # MODERN: LCEL approach (RECOMMENDED)
+       from langchain_core.prompts import PromptTemplate
+       from langchain_openai import OpenAI
+
+       prompt = PromptTemplate.from_template("Tell me a {adjective} joke")
+       chain = prompt | OpenAI()
+       result = chain.invoke({"adjective": "funny"})
+       ```
+
+    2. **With Output Parser**:
+       ```python
+       # DEPRECATED: LLMChain with output parser
+       from langchain_classic.chains import LLMChain
+       from langchain_core.output_parsers import StrOutputParser
+
+       chain = LLMChain(
+           llm=OpenAI(),
+           prompt=prompt,
+           output_parser=StrOutputParser()
+       )
+
+       # MODERN: LCEL with explicit parser (RECOMMENDED)
+       from langchain_core.output_parsers import StrOutputParser
+
+       chain = prompt | OpenAI() | StrOutputParser()
+       ```
+
+    3. **With Memory (Conversational)**:
+       ```python
+       # DEPRECATED: LLMChain with memory
+       from langchain_classic.chains import LLMChain
+       from langchain_classic.memory import ConversationBufferMemory
+
+       memory = ConversationBufferMemory()
+       chain = LLMChain(llm=OpenAI(), prompt=prompt, memory=memory)
+
+       # MODERN: LCEL with manual memory management (RECOMMENDED)
+       from langchain_core.runnables import RunnablePassthrough
+
+       def load_memory(input_dict):
+           input_dict["history"] = memory.load_memory_variables({})
+           return input_dict
+
+       chain = RunnablePassthrough.assign(history=load_memory) | prompt | OpenAI()
+       ```
+
+    **Type Flow Documentation**:
+    The complete execution flow through LLMChain:
+        Dict[input_vars] → prep_inputs (validate)
+        → prompt.format_prompt → PromptValue
+        → llm.generate_prompt/batch → LLMResult
+        → output_parser.parse_result → Dict[output_key: str]
+
+    **Callback Integration**:
+        on_chain_start → on_llm_start → on_llm_new_token (optional)
+        → on_llm_end → on_chain_end
+
+    Legacy Example (for reference only):
         ```python
         from langchain_classic.chains import LLMChain
         from langchain_community.llms import OpenAI
@@ -81,7 +145,27 @@ class LLMChain(Chain):
     prompt: BasePromptTemplate
     """Prompt object to use."""
     llm: Runnable[LanguageModelInput, str] | Runnable[LanguageModelInput, BaseMessage]
-    """Language model to call."""
+    """Language model to call.
+
+    Accepts Union type with the following options:
+    - Runnable[LanguageModelInput, str]: For completion models that return strings
+    - Runnable[LanguageModelInput, BaseMessage]: For chat models that return messages
+
+    Where LanguageModelInput can be:
+    - str: Plain text input
+    - List[BaseMessage]: Sequence of chat messages (HumanMessage, AIMessage, etc.)
+    - PromptValue: Formatted prompt value from prompt templates
+
+    Legacy BaseLanguageModel instances are also supported for backwards compatibility.
+
+    Implementation Requirements:
+    - Must implement either generate_prompt() method (BaseLanguageModel interface)
+      OR batch() method (Runnable interface)
+    - For Runnable implementations, batch() will be called with prompts and config
+    - Results are normalized to LLMResult format regardless of implementation type
+
+    Source: libs/core/langchain_core/language_models/base.py:98
+    """
     output_key: str = "text"  #: :meta private:
     output_parser: BaseLLMOutputParser = Field(default_factory=StrOutputParser)
     """Output parser to use.
@@ -120,6 +204,8 @@ class LLMChain(Chain):
         inputs: dict[str, Any],
         run_manager: CallbackManagerForChainRun | None = None,
     ) -> dict[str, str]:
+        # Type flow: Dict[str, Any] → generate() batches single input
+        # → LLMResult with generations → create_outputs() → Dict[output_key: str]
         response = self.generate([inputs], run_manager=run_manager)
         return self.create_outputs(response)[0]
 
@@ -131,6 +217,9 @@ class LLMChain(Chain):
         """Generate LLM result from inputs."""
         prompts, stop = self.prep_prompts(input_list, run_manager=run_manager)
         callbacks = run_manager.get_child() if run_manager else None
+        
+        # Code path 1: Legacy BaseLanguageModel interface
+        # Uses generate_prompt() which directly returns LLMResult
         if isinstance(self.llm, BaseLanguageModel):
             return self.llm.generate_prompt(
                 prompts,
@@ -138,14 +227,21 @@ class LLMChain(Chain):
                 callbacks=callbacks,
                 **self.llm_kwargs,
             )
+        
+        # Code path 2: Modern Runnable interface
+        # Uses batch() and normalizes results to LLMResult format
+        # Type flow: List[PromptValue] → llm.batch() → List[str | BaseMessage]
+        # → normalize to LLMResult(generations=List[List[Generation]])
         results = self.llm.bind(stop=stop, **self.llm_kwargs).batch(
             cast("list", prompts),
             {"callbacks": callbacks},
         )
         generations: list[list[Generation]] = []
         for res in results:
+            # Normalize BaseMessage responses to ChatGeneration
             if isinstance(res, BaseMessage):
                 generations.append([ChatGeneration(message=res)])
+            # Normalize string responses to Generation
             else:
                 generations.append([Generation(text=res)])
         return LLMResult(generations=generations)
@@ -191,6 +287,8 @@ class LLMChain(Chain):
         prompts = []
         for inputs in input_list:
             selected_inputs = {k: inputs[k] for k in self.prompt.input_variables}
+            # Type flow: Dict[str, Any] → prompt.format_prompt() → PromptValue
+            # PromptValue is the standardized format that can be passed to any LLM
             prompt = self.prompt.format_prompt(**selected_inputs)
             _colored_text = get_colored_text(prompt.to_string(), "green")
             _text = "Prompt after formatting:\n" + _colored_text
@@ -232,7 +330,70 @@ class LLMChain(Chain):
         input_list: list[dict[str, Any]],
         callbacks: Callbacks = None,
     ) -> list[dict[str, str]]:
-        """Utilize the LLM generate method for speed gains."""
+        """Utilize the LLM generate method for batch processing speed gains.
+
+        Process multiple inputs in a single batch, which is more efficient than
+        calling predict() multiple times. The LLM's generate() method is called
+        once with all inputs, reducing network overhead and taking advantage of
+        batch processing optimizations.
+
+        Args:
+            input_list: List of input dictionaries where each dict contains the
+                prompt input variables. Keys in each dict must match the
+                prompt.input_variables. Example: [{"adjective": "funny"},
+                {"adjective": "sad"}]
+            callbacks: Optional callback handlers or callback manager for chain
+                execution tracing. These callbacks will receive events like
+                on_chain_start, on_llm_start, on_llm_end, and on_chain_end.
+
+        Returns:
+            List of output dictionaries where each dict contains:
+            - self.output_key (default "text"): The parsed LLM output string
+            If return_final_only is False, each dict also contains:
+            - "full_generation": The complete Generation object with metadata
+
+        Raises:
+            KeyError: If any input dict is missing required prompt input_variables
+            ValueError: If prompt formatting fails (e.g., inconsistent "stop" values)
+            ValidationError: If Pydantic validation fails on prompt inputs
+            LLMError: Various LLM-specific errors (rate limits, API errors, etc.)
+
+        Type Flow:
+            List[Dict] → List[PromptValue] → llm.generate()
+            → LLMResult → List[Dict[output_key: str]]
+
+        Batch Processing Advantage:
+            This method makes a single LLM.generate() call for all inputs, which is
+            significantly more efficient than calling predict() in a loop. Benefits:
+            - Reduced network latency (one request vs N requests)
+            - Lower API overhead
+            - Potential cost savings with batch pricing
+            - Better throughput for high-volume processing
+
+        Example:
+            ```python
+            from langchain_classic.chains import LLMChain
+            from langchain_core.prompts import PromptTemplate
+            from langchain_openai import OpenAI
+
+            prompt = PromptTemplate.from_template("Tell me a {adjective} joke")
+            chain = LLMChain(llm=OpenAI(), prompt=prompt)
+
+            inputs = [
+                {"adjective": "funny"},
+                {"adjective": "sad"},
+                {"adjective": "clever"}
+            ]
+            results = chain.apply(inputs)
+            # Returns: [
+            #     {"text": "Why did the... [funny joke]"},
+            #     {"text": "What do you... [sad joke]"},
+            #     {"text": "A photon... [clever joke]"}
+            # ]
+            ```
+
+        Source: libs/langchain/langchain_classic/chains/llm.py:230
+        """
         callback_manager = CallbackManager.configure(
             callbacks,
             self.callbacks,
@@ -257,7 +418,70 @@ class LLMChain(Chain):
         input_list: list[dict[str, Any]],
         callbacks: Callbacks = None,
     ) -> list[dict[str, str]]:
-        """Utilize the LLM generate method for speed gains."""
+        """Async version: Utilize the LLM generate method for batch processing speed gains.
+
+        Asynchronous variant of apply() that processes multiple inputs in a single
+        batch. This method must be awaited and runs in an async event loop context.
+        Provides the same batch processing advantages as apply() while supporting
+        concurrent execution patterns.
+
+        Args:
+            input_list: List of input dictionaries where each dict contains the
+                prompt input variables. Keys in each dict must match the
+                prompt.input_variables. Example: [{"adjective": "funny"},
+                {"adjective": "sad"}]
+            callbacks: Optional callback handlers or callback manager for chain
+                execution tracing. Async callbacks will be properly awaited during
+                execution (on_chain_start, on_llm_start, on_llm_end, on_chain_end).
+
+        Returns:
+            List of output dictionaries where each dict contains:
+            - self.output_key (default "text"): The parsed LLM output string
+            If return_final_only is False, each dict also contains:
+            - "full_generation": The complete Generation object with metadata
+
+        Raises:
+            KeyError: If any input dict is missing required prompt input_variables
+            ValueError: If prompt formatting fails (e.g., inconsistent "stop" values)
+            ValidationError: If Pydantic validation fails on prompt inputs
+            LLMError: Various LLM-specific errors (rate limits, API errors, etc.)
+
+        Async Execution Notes:
+            - Requires await: Must be called with await keyword
+            - Event Loop: Runs in the current async event loop context
+            - Callback Handling: All callback methods are awaited if they are async
+            - Concurrency: For concurrent batch processing, consider asyncio.gather()
+              with multiple aapply() calls
+
+        Type Flow:
+            List[Dict] → List[PromptValue] → llm.agenerate()
+            → LLMResult → List[Dict[output_key: str]]
+
+        Example:
+            ```python
+            import asyncio
+            from langchain_classic.chains import LLMChain
+            from langchain_core.prompts import PromptTemplate
+            from langchain_openai import OpenAI
+
+            async def process_batch():
+                prompt = PromptTemplate.from_template("Tell me a {adjective} joke")
+                chain = LLMChain(llm=OpenAI(), prompt=prompt)
+
+                inputs = [
+                    {"adjective": "funny"},
+                    {"adjective": "sad"},
+                    {"adjective": "clever"}
+                ]
+                results = await chain.aapply(inputs)
+                return results
+
+            # Run in event loop
+            results = asyncio.run(process_batch())
+            ```
+
+        Source: libs/langchain/langchain_classic/chains/llm.py:255
+        """
         callback_manager = AsyncCallbackManager.configure(
             callbacks,
             self.callbacks,
@@ -306,34 +530,120 @@ class LLMChain(Chain):
     def predict(self, callbacks: Callbacks = None, **kwargs: Any) -> str:
         """Format prompt with kwargs and pass to LLM.
 
+        Convenience method that formats the prompt template with provided keyword
+        arguments and returns just the LLM output string (not the full dict).
+
         Args:
-            callbacks: Callbacks to pass to LLMChain
-            **kwargs: Keys to pass to prompt template.
+            callbacks: Optional callback handlers (or callback manager) for chain
+                execution tracing. Callbacks receive events throughout the chain
+                lifecycle: on_chain_start, on_llm_start, on_llm_new_token (if
+                streaming), on_llm_end, and on_chain_end.
+            **kwargs: Keyword arguments where keys must match prompt.input_variables
+                exactly. Values are typically strings but can be any type accepted
+                by the prompt template. Example: adjective="funny", topic="cats"
 
         Returns:
-            Completion from LLM.
+            Parsed LLM output string. Specifically returns the value of
+            self.output_key (default "text") from the result dictionary. The
+            output_parser is applied to the raw LLM response before returning.
+
+        Raises:
+            KeyError: If kwargs is missing any required prompt input_variables
+            ValidationError: If prompt template formatting fails (e.g., invalid
+                template variables or formatting syntax errors)
+            LLMError: Various LLM-specific errors including rate limiting,
+                authentication failures, or API errors
+
+        Type Flow:
+            kwargs → prompt.format() → PromptValue → llm.generate()
+            → LLMResult → output_parser.parse() → str
 
         Example:
             ```python
-            completion = llm.predict(adjective="funny")
+            from langchain_classic.chains import LLMChain
+            from langchain_core.prompts import PromptTemplate
+            from langchain_openai import OpenAI
+
+            prompt = PromptTemplate(
+                input_variables=["adjective", "topic"],
+                template="Tell me a {adjective} joke about {topic}"
+            )
+            chain = LLMChain(llm=OpenAI(), prompt=prompt)
+
+            # Direct keyword arguments matching input_variables
+            result = chain.predict(adjective="funny", topic="programming")
+            # Returns: "Why do programmers prefer dark mode?..."
             ```
+
+        Source: libs/langchain/langchain_classic/chains/llm.py:306
         """
         return self(kwargs, callbacks=callbacks)[self.output_key]
 
     async def apredict(self, callbacks: Callbacks = None, **kwargs: Any) -> str:
-        """Format prompt with kwargs and pass to LLM.
+        """Async version: Format prompt with kwargs and pass to LLM.
+
+        Asynchronous variant of predict() that must be awaited. Formats the prompt
+        template with provided keyword arguments and returns just the LLM output
+        string. Use this method when working in async contexts to avoid blocking.
 
         Args:
-            callbacks: Callbacks to pass to LLMChain
-            **kwargs: Keys to pass to prompt template.
+            callbacks: Optional callback handlers (or callback manager) for chain
+                execution tracing. Async callbacks will be properly awaited during
+                execution. Events include: on_chain_start, on_llm_start,
+                on_llm_new_token (if streaming), on_llm_end, and on_chain_end.
+            **kwargs: Keyword arguments where keys must match prompt.input_variables
+                exactly. Values are typically strings but can be any type accepted
+                by the prompt template. Example: adjective="funny", topic="cats"
 
         Returns:
-            Completion from LLM.
+            Parsed LLM output string. Specifically returns the value of
+            self.output_key (default "text") from the result dictionary. The
+            output_parser is applied to the raw LLM response before returning.
+
+        Raises:
+            KeyError: If kwargs is missing any required prompt input_variables
+            ValidationError: If prompt template formatting fails (e.g., invalid
+                template variables or formatting syntax errors)
+            LLMError: Various LLM-specific errors including rate limiting,
+                authentication failures, or API errors
+
+        Async Execution Notes:
+            - Requires await: Must be called with await keyword in async function
+            - Event Loop: Executes in the current async event loop context
+            - Callback Handling: All callback methods are properly awaited if async
+            - Non-Blocking: Does not block the event loop during LLM API calls
+
+        Type Flow:
+            kwargs → prompt.format() → PromptValue → llm.agenerate()
+            → LLMResult → output_parser.parse() → str
 
         Example:
             ```python
-            completion = llm.predict(adjective="funny")
+            import asyncio
+            from langchain_classic.chains import LLMChain
+            from langchain_core.prompts import PromptTemplate
+            from langchain_openai import OpenAI
+
+            async def get_joke():
+                prompt = PromptTemplate(
+                    input_variables=["adjective", "topic"],
+                    template="Tell me a {adjective} joke about {topic}"
+                )
+                chain = LLMChain(llm=OpenAI(), prompt=prompt)
+
+                # Must await the async method
+                result = await chain.apredict(
+                    adjective="funny",
+                    topic="programming"
+                )
+                return result
+
+            # Run in event loop
+            joke = asyncio.run(get_joke())
+            # Returns: "Why do programmers prefer dark mode?..."
             ```
+
+        Source: libs/langchain/langchain_classic/chains/llm.py:323
         """
         return (await self.acall(kwargs, callbacks=callbacks))[self.output_key]
 
