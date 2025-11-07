@@ -1,0 +1,23 @@
+# Requirements for LangChain Debugging Utilities and Examples
+# 
+# This file specifies the Python package dependencies required for running
+# the debugging utilities in the examples/debugging/ directory.
+#
+# Installation:
+#   uv pip install -r requirements.txt
+#   OR
+#   pip install -r requirements.txt
+#
+# Python Version: >=3.10.0,<4.0.0
+
+# Core LangChain abstractions for chain and callback inspection
+langchain-core==1.0.1
+
+# OpenAI integration for example chains to debug
+langchain-openai==0.3.35
+
+# Environment variable management for API keys and configuration
+python-dotenv==1.0.0
+
+# Type hint compatibility for Python 3.10+
+typing-extensions==4.15.0
