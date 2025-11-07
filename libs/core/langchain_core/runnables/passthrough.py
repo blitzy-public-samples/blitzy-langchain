@@ -836,50 +836,55 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Invoke the key picker, extracting specified keys from input dict.
+        """Invoke the assignment, enriching input dict with new computed fields.
 
-        Extracts only the keys specified during initialization from the input
-        dictionary. This is useful for filtering data before passing to downstream
-        Runnables.
+        Invokes the mapper RunnableParallel to compute new fields, then merges
+        the results with the original input dict. This is the main entry point
+        for enriching data with additional computed values.
 
         Args:
-            input: Input dictionary to extract keys from. Must be a dict[str, Any].
+            input: Input dictionary to enrich with assigned fields. Must be a
+                dict[str, Any] with keys expected by the mapper.
             config: Optional configuration for callbacks, tags, and metadata.
-                Used to track execution in LangSmith or custom callback handlers.
-            **kwargs: Additional keyword arguments (currently unused).
+                Passed to the mapper for tracking execution.
+            **kwargs: Additional keyword arguments passed to the mapper.
 
         Returns:
-            dict[str, Any] | Any | None: Extracted value(s) based on keys:
-                - If self.keys is a single string: returns the value for that key
-                  (or None if key not in input)
-                - If self.keys is a list: returns a dict containing only the
-                  specified keys that exist in input
-                - If none of the specified keys are found: returns None
+            dict[str, Any]: Merged dictionary containing all original input keys
+                plus new keys computed by the mapper. If mapper keys conflict
+                with input keys, mapper values overwrite input values.
 
         Raises:
-            ValueError: If input is not a dict instance. RunnablePick requires
-                dict inputs to perform key selection.
+            ValueError: If input is not a dict instance. RunnableAssign requires
+                dict inputs for key-value assignment.
 
         Example:
             ```python
-            from langchain_core.runnables.passthrough import RunnablePick
+            from langchain_core.runnables import RunnablePassthrough
 
-            # Pick single key
-            picker_single = RunnablePick(keys="name")
-            result = picker_single.invoke({"name": "Alice", "age": 30})
-            # Returns: "Alice"
+            # Using RunnablePassthrough.assign() factory method
+            chain = RunnablePassthrough.assign(
+                text_length=lambda x: len(x["text"]),
+                word_count=lambda x: len(x["text"].split())
+            )
+            
+            result = chain.invoke({"text": "Hello world"})
+            # Returns: {
+            #     'text': 'Hello world',
+            #     'text_length': 11,
+            #     'word_count': 2
+            # }
 
-            # Pick multiple keys
-            picker_multi = RunnablePick(keys=["name", "age"])
-            result = picker_multi.invoke({"name": "Alice", "age": 30, "city": "NYC"})
-            # Returns: {'name': 'Alice', 'age': 30}
-
-            # Missing keys are omitted
-            result = picker_multi.invoke({"name": "Bob"})
-            # Returns: {'name': 'Bob'}
+            # Chaining multiple assignments
+            chain = (
+                RunnablePassthrough.assign(upper=lambda x: x["text"].upper())
+                | RunnablePassthrough.assign(length=lambda x: len(x["upper"]))
+            )
+            result = chain.invoke({"text": "hello"})
+            # Returns: {'text': 'hello', 'upper': 'HELLO', 'length': 5}
             ```
 
-        Source: libs/core/langchain_core/runnables/passthrough.py:1041
+        Source: libs/core/langchain_core/runnables/passthrough.py:833
         """
         return self._call_with_config(self._invoke, input, config, **kwargs)
 
@@ -932,51 +937,57 @@ class RunnableAssign(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Asynchronously invoke the key picker, extracting specified keys.
+        """Asynchronously invoke the assignment, enriching input dict with new fields.
 
-        Asynchronously extracts only the keys specified during initialization from
-        the input dictionary. This is useful for filtering data in async chains
-        before passing to downstream Runnables.
+        Asynchronously invokes the mapper RunnableParallel to compute new fields,
+        then merges the results with the original input dict. This is the async
+        entry point for enriching data with additional computed values.
 
         Args:
-            input: Input dictionary to extract keys from. Must be a dict[str, Any].
+            input: Input dictionary to enrich with assigned fields. Must be a
+                dict[str, Any] with keys expected by the mapper.
             config: Optional configuration for callbacks, tags, and metadata.
-                Used to track execution in LangSmith or custom callback handlers.
-            **kwargs: Additional keyword arguments (currently unused).
+                Passed to the mapper for tracking async execution.
+            **kwargs: Additional keyword arguments passed to the mapper.
 
         Returns:
-            dict[str, Any] | Any | None: Extracted value(s) based on keys:
-                - If self.keys is a single string: returns the value for that key
-                  (or None if key not in input)
-                - If self.keys is a list: returns a dict containing only the
-                  specified keys that exist in input
-                - If none of the specified keys are found: returns None
+            dict[str, Any]: Merged dictionary containing all original input keys
+                plus new keys computed by the mapper. If mapper keys conflict
+                with input keys, mapper values overwrite input values.
 
         Raises:
-            ValueError: If input is not a dict instance. RunnablePick requires
-                dict inputs to perform key selection.
+            ValueError: If input is not a dict instance. RunnableAssign requires
+                dict inputs for key-value assignment.
 
         Example:
             ```python
             import asyncio
-            from langchain_core.runnables.passthrough import RunnablePick
+            from langchain_core.runnables import RunnablePassthrough
 
-            # Pick single key
-            picker_single = RunnablePick(keys="name")
-            result = await picker_single.ainvoke({"name": "Alice", "age": 30})
-            # Returns: "Alice"
+            # Using RunnablePassthrough.assign() in async chain
+            chain = RunnablePassthrough.assign(
+                text_length=lambda x: len(x["text"]),
+                word_count=lambda x: len(x["text"].split())
+            )
+            
+            result = await chain.ainvoke({"text": "Hello world"})
+            # Returns: {
+            #     'text': 'Hello world',
+            #     'text_length': 11,
+            #     'word_count': 2
+            # }
 
-            # Pick multiple keys in async chain
-            picker_multi = RunnablePick(keys=["name", "age"])
-            result = await picker_multi.ainvoke({
-                "name": "Alice",
-                "age": 30,
-                "city": "NYC"
-            })
-            # Returns: {'name': 'Alice', 'age': 30}
+            # Async chain with async mapper functions
+            async def async_process(x):
+                await asyncio.sleep(0.1)  # Simulate async work
+                return x["text"].upper()
+
+            chain = RunnablePassthrough.assign(processed=async_process)
+            result = await chain.ainvoke({"text": "hello"})
+            # Returns: {'text': 'hello', 'processed': 'HELLO'}
             ```
 
-        Source: libs/core/langchain_core/runnables/passthrough.py:1101
+        Source: libs/core/langchain_core/runnables/passthrough.py:934
         """
         return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
 
@@ -1303,42 +1314,50 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Invoke the assignment, enriching input dict with new computed fields.
+        """Invoke the key picker, extracting specified keys from input dict.
 
-        Executes the mapper RunnableParallel with the input dict, then merges
-        the results with the original input. All original keys are preserved,
-        and new keys from the mapper outputs are added.
+        Extracts only the keys specified during initialization from the input
+        dictionary. This is useful for filtering data before passing to downstream
+        Runnables.
 
         Args:
-            input: Input dictionary to enrich. Must be a dict[str, Any].
-                All Runnables/Callables in the mapper receive this full dict.
+            input: Input dictionary to extract keys from. Must be a dict[str, Any].
             config: Optional configuration for callbacks, tags, and metadata.
                 Used to track execution in LangSmith or custom callback handlers.
-            **kwargs: Additional keyword arguments passed to the mapper.
+            **kwargs: Additional keyword arguments (currently unused).
 
         Returns:
-            dict[str, Any]: Merged dictionary containing all original keys from
-                input plus new keys computed by the mapper. If mapper keys conflict
-                with input keys, mapper values overwrite input values.
+            dict[str, Any] | Any | None: Extracted value(s) based on keys:
+                - If self.keys is a single string: returns the value for that key
+                  (or None if key not in input)
+                - If self.keys is a list: returns a dict containing only the
+                  specified keys that exist in input
+                - If none of the specified keys are found: returns None
 
         Raises:
-            ValueError: If input is not a dict instance. RunnableAssign requires
-                dict inputs to perform key assignment.
+            ValueError: If input is not a dict instance. RunnablePick requires
+                dict inputs to perform key selection.
 
         Example:
             ```python
-            from langchain_core.runnables import RunnablePassthrough
+            from langchain_core.runnables.passthrough import RunnablePick
 
-            enricher = RunnablePassthrough.assign(
-                length=lambda x: len(x["text"]),
-                uppercase=lambda x: x["text"].upper(),
-            )
+            # Pick single key
+            picker_single = RunnablePick(keys="name")
+            result = picker_single.invoke({"name": "Alice", "age": 30})
+            # Returns: "Alice"
 
-            result = enricher.invoke({"text": "hello"})
-            # Returns: {'text': 'hello', 'length': 5, 'uppercase': 'HELLO'}
+            # Pick multiple keys
+            picker_multi = RunnablePick(keys=["name", "age"])
+            result = picker_multi.invoke({"name": "Alice", "age": 30, "city": "NYC"})
+            # Returns: {'name': 'Alice', 'age': 30}
+
+            # Missing keys are omitted
+            result = picker_multi.invoke({"name": "Bob"})
+            # Returns: {'name': 'Bob'}
             ```
 
-        Source: libs/core/langchain_core/runnables/passthrough.py:651
+        Source: libs/core/langchain_core/runnables/passthrough.py:1311
         """
         return self._call_with_config(self._invoke, input, config, **kwargs)
 
@@ -1367,48 +1386,51 @@ class RunnablePick(RunnableSerializable[dict[str, Any], dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Asynchronously invoke the assignment, enriching input with new fields.
+        """Asynchronously invoke the key picker, extracting specified keys.
 
-        Asynchronously executes the mapper RunnableParallel with the input dict,
-        then merges the results with the original input. All original keys are
-        preserved, and new keys from the mapper outputs are added. Mapper
-        Runnables execute in parallel when possible.
+        Asynchronously extracts only the keys specified during initialization from
+        the input dictionary. This is useful for filtering data in async chains
+        before passing to downstream Runnables.
 
         Args:
-            input: Input dictionary to enrich. Must be a dict[str, Any].
-                All Runnables/Callables in the mapper receive this full dict.
+            input: Input dictionary to extract keys from. Must be a dict[str, Any].
             config: Optional configuration for callbacks, tags, and metadata.
                 Used to track execution in LangSmith or custom callback handlers.
-            **kwargs: Additional keyword arguments passed to the mapper.
+            **kwargs: Additional keyword arguments (currently unused).
 
         Returns:
-            dict[str, Any]: Merged dictionary containing all original keys from
-                input plus new keys computed by the mapper. If mapper keys conflict
-                with input keys, mapper values overwrite input values.
+            dict[str, Any] | Any | None: Extracted value(s) based on keys:
+                - If self.keys is a single string: returns the value for that key
+                  (or None if key not in input)
+                - If self.keys is a list: returns a dict containing only the
+                  specified keys that exist in input
+                - If none of the specified keys are found: returns None
 
         Raises:
-            ValueError: If input is not a dict instance. RunnableAssign requires
-                dict inputs to perform key assignment.
+            ValueError: If input is not a dict instance. RunnablePick requires
+                dict inputs to perform key selection.
 
         Example:
             ```python
             import asyncio
-            from langchain_core.runnables import RunnablePassthrough
+            from langchain_core.runnables.passthrough import RunnablePick
 
-            async def async_compute_length(x):
-                await asyncio.sleep(0.1)  # Simulate async operation
-                return len(x["text"])
+            # Pick single key
+            picker_single = RunnablePick(keys="name")
+            result = await picker_single.ainvoke({"name": "Alice", "age": 30})
+            # Returns: "Alice"
 
-            enricher = RunnablePassthrough.assign(
-                length=async_compute_length,
-                uppercase=lambda x: x["text"].upper(),
-            )
-
-            result = await enricher.ainvoke({"text": "hello"})
-            # Returns: {'text': 'hello', 'length': 5, 'uppercase': 'HELLO'}
+            # Pick multiple keys in async chain
+            picker_multi = RunnablePick(keys=["name", "age"])
+            result = await picker_multi.ainvoke({
+                "name": "Alice",
+                "age": 30,
+                "city": "NYC"
+            })
+            # Returns: {'name': 'Alice', 'age': 30}
             ```
 
-        Source: libs/core/langchain_core/runnables/passthrough.py:720
+        Source: libs/core/langchain_core/runnables/passthrough.py:1383
         """
         return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
 
