@@ -241,19 +241,58 @@ def handle_event(
     *args: Any,
     **kwargs: Any,
 ) -> None:
-    """Generic event handler for CallbackManager.
+    """Generic synchronous event dispatcher for callback handlers.
+    
+    Dispatches events to all registered callback handlers, handling both synchronous
+    and asynchronous handlers appropriately. For async handlers called from sync
+    context, this function manages the async/sync bridging using ThreadPoolExecutor
+    to avoid deadlocks when an event loop is already running.
 
-    !!! note
-        This function is used by `LangServe` to handle events.
+    !!! note "LangServe Integration"
+        This function is used by `LangServe` to handle events in server contexts.
 
     Args:
-        handlers: The list of handlers that will handle the event.
-        event_name: The name of the event (e.g., `'on_llm_start'`).
-        ignore_condition_name: Name of the attribute defined on handler
-            that if True will cause the handler to be skipped for the given event.
-        *args: The arguments to pass to the event handler.
-        **kwargs: The keyword arguments to pass to the event handler
-
+        handlers: The list of callback handlers that will receive the event. Each
+            handler's corresponding event method will be invoked if the handler
+            passes the ignore condition check.
+        event_name: The name of the event method to invoke on each handler
+            (e.g., `'on_llm_start'`, `'on_chain_end'`, `'on_tool_error'`).
+        ignore_condition_name: Name of the boolean attribute on the handler that,
+            if True, causes the handler to be skipped for this event. For example,
+            `'ignore_llm'` skips handlers with `handler.ignore_llm == True`. Pass
+            None to invoke all handlers regardless.
+        *args: Positional arguments to pass to each handler's event method.
+        **kwargs: Keyword arguments to pass to each handler's event method.
+    
+    !!! warning "Async Handler Execution"
+        When a handler's event method is a coroutine, it is collected and executed
+        using the async/sync bridging mechanism. If an event loop is already running,
+        coroutines are submitted to a ThreadPoolExecutor to avoid deadlocks. Otherwise,
+        they are executed in a new event loop via `_run_coros()`.
+    
+    !!! info "Error Handling"
+        - **NotImplementedError**: Special handling for `on_chat_model_start` falls
+          back to `on_llm_start` with converted message strings.
+        - **Other Exceptions**: Logged as warnings and raised only if the handler's
+          `raise_error` attribute is True, allowing other handlers to continue.
+    
+    Example:
+        ```python
+        from langchain_core.callbacks.stdout import StdOutCallbackHandler
+        
+        handlers = [StdOutCallbackHandler()]
+        handle_event(
+            handlers,
+            "on_llm_start",
+            "ignore_llm",
+            {"name": "OpenAI"},
+            ["What is AI?"],
+            run_id=uuid.uuid4(),
+            tags=["question"]
+        )
+        ```
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:237
     """
     coros: list[Coroutine[Any, Any, Any]] = []
 
@@ -321,6 +360,31 @@ def handle_event(
 
 
 def _run_coros(coros: list[Coroutine[Any, Any, Any]]) -> None:
+    """Execute async callback coroutines in a new event loop from sync context.
+    
+    This function handles the async/sync bridging pattern used when async callback
+    handlers need to be invoked from synchronous callback manager methods. It uses
+    different strategies depending on Python version for optimal event loop management.
+    
+    Args:
+        coros: List of coroutines to execute. These are typically async callback
+            handler methods that need to run even when called from sync code.
+    
+    !!! note "Python Version Compatibility"
+        - **Python 3.11+**: Uses `asyncio.Runner` API which properly manages
+          signal handlers, pending tasks, asyncgens, and executors in a clean
+          event loop lifecycle.
+        - **Python <3.11**: Falls back to running each coroutine individually
+          with `asyncio.run()`, creating and tearing down a new event loop
+          for each coroutine.
+    
+    !!! warning "Error Handling"
+        Exceptions raised by individual coroutines are caught and logged as warnings
+        but do not prevent other coroutines from executing. This ensures that a
+        failing callback handler does not break the entire callback chain.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:323
+    """
     if hasattr(asyncio, "Runner"):
         # Python 3.11+
         # Run the coroutines in a new event loop, taking care to
@@ -408,19 +472,57 @@ async def ahandle_event(
     *args: Any,
     **kwargs: Any,
 ) -> None:
-    """Async generic event handler for `AsyncCallbackManager`.
+    """Async event dispatcher for callback handlers with inline execution control.
+    
+    Dispatches events to all registered callback handlers in an async context,
+    with special handling for handlers marked as `run_inline`. Inline handlers
+    execute sequentially to maintain order, while other handlers execute
+    concurrently via asyncio.gather() for optimal performance.
 
-    !!! note
-        This function is used by `LangServe` to handle events.
+    !!! note "LangServe Integration"
+        This function is used by `LangServe` to handle events in async server contexts.
 
     Args:
-        handlers: The list of handlers that will handle the event.
-        event_name: The name of the event (e.g., `'on_llm_start'`).
-        ignore_condition_name: Name of the attribute defined on handler
-            that if True will cause the handler to be skipped for the given event.
-        *args: The arguments to pass to the event handler.
-        **kwargs: The keyword arguments to pass to the event handler.
-
+        handlers: The list of callback handlers that will receive the event. Handlers
+            are automatically separated into inline and concurrent groups based on
+            their `run_inline` attribute.
+        event_name: The name of the event method to invoke on each handler
+            (e.g., `'on_llm_start'`, `'on_chain_end'`, `'on_tool_error'`).
+        ignore_condition_name: Name of the boolean attribute on the handler that,
+            if True, causes the handler to be skipped for this event. For example,
+            `'ignore_llm'` skips handlers with `handler.ignore_llm == True`. Pass
+            None to invoke all handlers regardless.
+        *args: Positional arguments to pass to each handler's event method.
+        **kwargs: Keyword arguments to pass to each handler's event method.
+    
+    !!! info "Execution Order"
+        - **Inline Handlers** (`run_inline=True`): Executed sequentially in order
+          to preserve execution dependencies and allow handlers to affect subsequent
+          handler behavior.
+        - **Concurrent Handlers** (`run_inline=False`): Executed concurrently via
+          `asyncio.gather()` for better performance when order independence exists.
+    
+    !!! info "Sync Handler Support"
+        Non-async handler methods are supported. Sync handlers marked with `run_inline=True`
+        execute inline, while others run in the executor pool to avoid blocking the
+        event loop.
+    
+    Example:
+        ```python
+        from langchain_core.callbacks.stdout import StdOutCallbackHandler
+        
+        handlers = [StdOutCallbackHandler()]
+        await ahandle_event(
+            handlers,
+            "on_chain_start",
+            "ignore_chain",
+            {"name": "MyChain"},
+            {"input": "data"},
+            run_id=uuid.uuid4()
+        )
+        ```
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:468
     """
     for handler in [h for h in handlers if h.run_inline]:
         await _ahandle_event_for_handler(
@@ -554,14 +656,44 @@ class ParentRunManager(RunManager):
     """Sync Parent Run Manager."""
 
     def get_child(self, tag: str | None = None) -> CallbackManager:
-        """Get a child callback manager.
+        """Get a child callback manager with inherited handlers, tags, and metadata.
+        
+        Creates a new callback manager instance that inherits all inheritable handlers,
+        tags, and metadata from this parent manager, establishing a parent-child run
+        relationship. This is used when a chain or tool creates nested executions that
+        should be tracked as children in the run hierarchy.
 
         Args:
-            tag: The tag for the child callback manager.
+            tag: Optional tag to add to the child manager (not inherited by its children).
+                Useful for labeling specific sub-operations within a chain execution.
 
         Returns:
-            The child callback manager.
-
+            A new CallbackManager instance configured as a child of this manager, with:
+            - parent_run_id set to this manager's run_id
+            - All inheritable_handlers copied (but not local handlers)
+            - All inheritable_tags copied (but not local tags)
+            - All inheritable_metadata copied (but not local metadata)
+            - Optional tag added as a local tag if provided
+        
+        !!! note "Run Hierarchy"
+            The parent-child relationship is established via parent_run_id, allowing
+            tracing systems like LangSmith to visualize nested execution trees.
+        
+        Example:
+            ```python
+            # Parent manager for outer chain
+            parent_manager = CallbackManager.configure(
+                inheritable_callbacks=[handler],
+                inheritable_tags=["outer-chain"]
+            )
+            
+            # Child manager for nested tool execution
+            child_manager = parent_manager.get_child(tag="tool-execution")
+            # child_manager inherits handler and "outer-chain" tag
+            # child_manager also has local "tool-execution" tag
+            ```
+        
+        Source: libs/core/langchain_core/callbacks/manager.py:556
         """
         manager = CallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
@@ -638,14 +770,43 @@ class AsyncParentRunManager(AsyncRunManager):
     """Async Parent Run Manager."""
 
     def get_child(self, tag: str | None = None) -> AsyncCallbackManager:
-        """Get a child callback manager.
+        """Get a child async callback manager with inherited handlers, tags, and metadata.
+        
+        Creates a new async callback manager instance that inherits all inheritable
+        handlers, tags, and metadata from this parent manager, establishing a parent-child
+        run relationship in async execution contexts.
 
         Args:
-            tag: The tag for the child callback manager.
+            tag: Optional tag to add to the child manager (not inherited by its children).
+                Useful for labeling specific sub-operations within an async chain execution.
 
         Returns:
-            The child callback manager.
-
+            A new AsyncCallbackManager instance configured as a child of this manager, with:
+            - parent_run_id set to this manager's run_id
+            - All inheritable_handlers copied (but not local handlers)
+            - All inheritable_tags copied (but not local tags)
+            - All inheritable_metadata copied (but not local metadata)
+            - Optional tag added as a local tag if provided
+        
+        !!! note "Async Run Hierarchy"
+            The parent-child relationship is established via parent_run_id, allowing
+            tracing systems like LangSmith to visualize nested async execution trees.
+        
+        Example:
+            ```python
+            # Parent manager for outer async chain
+            parent_manager = AsyncCallbackManager.configure(
+                inheritable_callbacks=[handler],
+                inheritable_tags=["async-outer-chain"]
+            )
+            
+            # Child manager for nested async tool execution
+            child_manager = parent_manager.get_child(tag="async-tool")
+            # child_manager inherits handler and "async-outer-chain" tag
+            # child_manager also has local "async-tool" tag
+            ```
+        
+        Source: libs/core/langchain_core/callbacks/manager.py:640
         """
         manager = AsyncCallbackManager(handlers=[], parent_run_id=self.run_id)
         manager.set_handlers(self.inheritable_handlers)
@@ -657,7 +818,30 @@ class AsyncParentRunManager(AsyncRunManager):
 
 
 class CallbackManagerForLLMRun(RunManager, LLMManagerMixin):
-    """Callback manager for LLM run."""
+    """Callback manager for the lifecycle of a single LLM invocation.
+    
+    This run manager is created when an LLM starts execution and provides methods
+    to dispatch lifecycle events (token generation, completion, errors) to all
+    registered callback handlers. It maintains the run context (run_id, tags,
+    metadata) throughout the LLM execution.
+    
+    Lifecycle Methods:
+    - `on_llm_new_token()`: Called for each token generated (streaming mode)
+    - `on_llm_end()`: Called when LLM completes successfully
+    - `on_llm_error()`: Called if LLM raises an exception
+    
+    !!! note "Run Context"
+        The run manager inherits handlers, tags, and metadata from the parent
+        callback manager and associates them with a unique run_id for this
+        specific LLM invocation.
+    
+    !!! info "Streaming Support"
+        The `on_llm_new_token()` method enables real-time streaming responses,
+        allowing handlers to process tokens as they are generated rather than
+        waiting for the complete response.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:659
+    """
 
     def on_llm_new_token(
         self,
@@ -737,7 +921,30 @@ class CallbackManagerForLLMRun(RunManager, LLMManagerMixin):
 
 
 class AsyncCallbackManagerForLLMRun(AsyncRunManager, LLMManagerMixin):
-    """Async callback manager for LLM run."""
+    """Async callback manager for the lifecycle of a single LLM invocation.
+    
+    This async run manager is created when an LLM starts execution in an async
+    context and provides async methods to dispatch lifecycle events (token generation,
+    completion, errors) to all registered callback handlers. It maintains the run
+    context (run_id, tags, metadata) throughout the async LLM execution.
+    
+    Lifecycle Methods:
+    - `on_llm_new_token()`: Called for each token generated (async streaming mode)
+    - `on_llm_end()`: Called when LLM completes successfully
+    - `on_llm_error()`: Called if LLM raises an exception
+    
+    !!! note "Async Context"
+        All lifecycle methods are async and should be awaited. The manager uses
+        `ahandle_event()` for proper async event dispatching to both sync and
+        async callback handlers.
+    
+    !!! info "Streaming Support"
+        The `on_llm_new_token()` method enables real-time async streaming responses,
+        allowing handlers to process tokens as they are generated without blocking
+        the event loop.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:739
+    """
 
     def get_sync(self) -> CallbackManagerForLLMRun:
         """Get the equivalent sync RunManager.
@@ -840,7 +1047,29 @@ class AsyncCallbackManagerForLLMRun(AsyncRunManager, LLMManagerMixin):
 
 
 class CallbackManagerForChainRun(ParentRunManager, ChainManagerMixin):
-    """Callback manager for chain run."""
+    """Callback manager for the lifecycle of a single chain execution.
+    
+    This run manager is created when a chain starts execution and provides methods
+    to dispatch lifecycle events (completion, errors, agent actions) to all registered
+    callback handlers. As a ParentRunManager, it can create child callback managers
+    for nested operations (sub-chains, LLM calls, tool executions).
+    
+    Lifecycle Methods:
+    - `on_chain_end()`: Called when chain completes successfully
+    - `on_chain_error()`: Called if chain raises an exception
+    - `on_agent_action()`: Called when an agent takes an action
+    - `on_agent_finish()`: Called when an agent completes
+    
+    !!! note "Parent-Child Relationships"
+        This manager can spawn child run managers for nested operations via inherited
+        ParentRunManager methods, establishing a hierarchical run tree for tracing.
+    
+    !!! info "Agent Integration"
+        Includes agent-specific lifecycle methods (on_agent_action, on_agent_finish)
+        for tracking agent reasoning loops within chain execution.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:842
+    """
 
     def on_chain_end(self, outputs: dict[str, Any] | Any, **kwargs: Any) -> None:
         """Run when chain ends running.
@@ -930,7 +1159,32 @@ class CallbackManagerForChainRun(ParentRunManager, ChainManagerMixin):
 
 
 class AsyncCallbackManagerForChainRun(AsyncParentRunManager, ChainManagerMixin):
-    """Async callback manager for chain run."""
+    """Async callback manager for the lifecycle of a single chain execution.
+    
+    This async run manager is created when a chain starts execution in an async
+    context and provides async methods to dispatch lifecycle events (completion,
+    errors, agent actions) to all registered callback handlers. As an
+    AsyncParentRunManager, it can create child async callback managers for nested
+    operations.
+    
+    Lifecycle Methods:
+    - `on_chain_end()`: Async method called when chain completes successfully
+    - `on_chain_error()`: Async method called if chain raises an exception
+    - `on_agent_action()`: Async method called when an agent takes an action
+    - `on_agent_finish()`: Async method called when an agent completes
+    
+    !!! note "Shielded Operations"
+        End and error methods are decorated with @shielded to ensure they complete
+        even if the parent task is cancelled, guaranteeing proper cleanup and
+        tracing data is recorded.
+    
+    !!! info "Parent-Child Relationships"
+        This manager can spawn child async run managers for nested operations via
+        inherited AsyncParentRunManager methods, establishing a hierarchical async
+        run tree for tracing.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:932
+    """
 
     def get_sync(self) -> CallbackManagerForChainRun:
         """Get the equivalent sync RunManager.
@@ -1039,7 +1293,28 @@ class AsyncCallbackManagerForChainRun(AsyncParentRunManager, ChainManagerMixin):
 
 
 class CallbackManagerForToolRun(ParentRunManager, ToolManagerMixin):
-    """Callback manager for tool run."""
+    """Callback manager for the lifecycle of a single tool execution.
+    
+    This run manager is created when a tool (typically used by an agent) starts
+    execution and provides methods to dispatch lifecycle events (completion, errors)
+    to all registered callback handlers. As a ParentRunManager, it can create child
+    callback managers for nested operations within tool execution.
+    
+    Lifecycle Methods:
+    - `on_tool_end()`: Called when tool completes successfully
+    - `on_tool_error()`: Called if tool raises an exception
+    
+    !!! note "Agent Integration"
+        Tools are primarily used by agents to perform actions. This manager tracks
+        individual tool invocations as part of the agent's reasoning loop, allowing
+        tracing systems to visualize tool usage patterns.
+    
+    !!! info "Output Flexibility"
+        The `on_tool_end()` method accepts Any type for output, as tools can return
+        various data types (strings, dicts, objects) depending on their implementation.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:1041
+    """
 
     def on_tool_end(
         self,
@@ -1093,7 +1368,28 @@ class CallbackManagerForToolRun(ParentRunManager, ToolManagerMixin):
 
 
 class AsyncCallbackManagerForToolRun(AsyncParentRunManager, ToolManagerMixin):
-    """Async callback manager for tool run."""
+    """Async callback manager for the lifecycle of a single tool execution.
+    
+    This async run manager is created when a tool starts execution in an async
+    context and provides async methods to dispatch lifecycle events (completion,
+    errors) to all registered callback handlers. Used by async agents for non-blocking
+    tool invocations.
+    
+    Lifecycle Methods:
+    - `on_tool_end()`: Async method called when tool completes successfully
+    - `on_tool_error()`: Async method called if tool raises an exception
+    
+    !!! note "Async Agent Integration"
+        Async tools enable agents to perform I/O-bound operations (API calls,
+        database queries) without blocking the event loop, improving agent
+        performance and responsiveness.
+    
+    !!! info "Output Flexibility"
+        The `on_tool_end()` method accepts Any type for output, as async tools can
+        return various data types depending on their implementation.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:1095
+    """
 
     def get_sync(self) -> CallbackManagerForToolRun:
         """Get the equivalent sync RunManager.
@@ -1160,7 +1456,29 @@ class AsyncCallbackManagerForToolRun(AsyncParentRunManager, ToolManagerMixin):
 
 
 class CallbackManagerForRetrieverRun(ParentRunManager, RetrieverManagerMixin):
-    """Callback manager for retriever run."""
+    """Callback manager for the lifecycle of a single retriever execution.
+    
+    This run manager is created when a retriever (used in RAG patterns) starts
+    execution and provides methods to dispatch lifecycle events (document retrieval,
+    errors) to all registered callback handlers. Retrievers fetch relevant documents
+    from vector stores or other sources based on a query.
+    
+    Lifecycle Methods:
+    - `on_retriever_end()`: Called when retriever completes successfully with documents
+    - `on_retriever_error()`: Called if retriever raises an exception
+    
+    !!! note "RAG Pattern Integration"
+        Retrievers are essential in Retrieval-Augmented Generation (RAG) patterns,
+        fetching context documents that are passed to LLMs. This manager enables
+        tracing and monitoring of the retrieval step.
+    
+    !!! info "Document Output"
+        The `on_retriever_end()` method receives a Sequence[Document] containing
+        the retrieved documents, allowing handlers to inspect what context was
+        fetched for the query.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:1162
+    """
 
     def on_retriever_end(
         self,
@@ -1217,7 +1535,29 @@ class AsyncCallbackManagerForRetrieverRun(
     AsyncParentRunManager,
     RetrieverManagerMixin,
 ):
-    """Async callback manager for retriever run."""
+    """Async callback manager for the lifecycle of a single retriever execution.
+    
+    This async run manager is created when a retriever starts execution in an async
+    context and provides async methods to dispatch lifecycle events (document
+    retrieval, errors) to all registered callback handlers. Used in async RAG
+    patterns for non-blocking document fetching.
+    
+    Lifecycle Methods:
+    - `on_retriever_end()`: Async method called when retriever completes with documents
+    - `on_retriever_error()`: Async method called if retriever raises an exception
+    
+    !!! note "Async RAG Patterns"
+        Async retrievers enable non-blocking document fetching in async chain
+        execution, improving performance when retrieval involves network calls
+        or database queries.
+    
+    !!! info "Shielded Operations"
+        End and error methods are decorated with @shielded to ensure they complete
+        even if the parent task is cancelled, guaranteeing retrieval metrics are
+        recorded.
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:1216
+    """
 
     def get_sync(self) -> CallbackManagerForRetrieverRun:
         """Get the equivalent sync RunManager.
@@ -1601,19 +1941,60 @@ class CallbackManager(BaseCallbackManager):
         inheritable_metadata: dict[str, Any] | None = None,
         local_metadata: dict[str, Any] | None = None,
     ) -> CallbackManager:
-        """Configure the callback manager.
+        """Configure the callback manager with handlers, tags, and metadata propagation.
+        
+        This method creates a new callback manager instance with the specified handlers
+        and configuration, properly managing the distinction between inheritable and
+        local attributes. Inheritable attributes are passed down to child callback
+        managers created during chain execution, while local attributes only apply to
+        the current manager instance.
 
         Args:
-            inheritable_callbacks: The inheritable callbacks.
-            local_callbacks: The local callbacks.
-            verbose: Whether to enable verbose mode.
-            inheritable_tags: The inheritable tags.
-            local_tags: The local tags.
-            inheritable_metadata: The inheritable metadata.
-            local_metadata: The local metadata.
+            inheritable_callbacks: Callback handlers that will be propagated to child
+                callback managers. Can be a list of handlers or another CallbackManager
+                instance to copy configuration from.
+            local_callbacks: Callback handlers that apply only to this manager instance
+                and are not inherited by child managers. Can be a list of handlers or
+                another CallbackManager instance.
+            verbose: Whether to enable verbose mode, which adds StdOutCallbackHandler
+                for printing execution details to stdout.
+            inheritable_tags: Tags that will be propagated to child callback managers,
+                useful for hierarchical run organization in tracing systems.
+            local_tags: Tags that apply only to this manager instance and are not
+                inherited by child managers.
+            inheritable_metadata: Metadata dict that will be propagated to child
+                callback managers, useful for passing context through execution chains.
+            local_metadata: Metadata dict that applies only to this manager instance
+                and is not inherited by child managers.
 
         Returns:
-            The configured callback manager.
+            A configured CallbackManager instance with all handlers, tags, and metadata
+            properly registered and ready for use in chain execution. The manager will
+            also include any handlers configured via environment variables (e.g.,
+            LANGCHAIN_TRACING_V2 for LangSmith tracing).
+        
+        !!! note "Handler Propagation"
+            When a callback manager creates child managers (e.g., when a chain invokes
+            a nested chain), only handlers and attributes marked as "inheritable" are
+            passed down. This allows for fine-grained control over callback scope.
+        
+        Example:
+            ```python
+            from langchain_core.callbacks import CallbackManager
+            from langchain_core.callbacks.stdout import StdOutCallbackHandler
+            
+            # Create manager with inheritable handler for nested chains
+            manager = CallbackManager.configure(
+                inheritable_callbacks=[StdOutCallbackHandler()],
+                inheritable_tags=["main-chain"],
+                verbose=True
+            )
+            
+            # Child managers will inherit the handler and tags
+            child_manager = manager.on_chain_start({"name": "child"}, {})
+            ```
+        
+        Source: libs/core/langchain_core/callbacks/manager.py:1619
         """
         return _configure(
             cls,
@@ -1628,7 +2009,41 @@ class CallbackManager(BaseCallbackManager):
 
 
 class CallbackManagerForChainGroup(CallbackManager):
-    """Callback manager for the chain group."""
+    """Callback manager for grouping multiple operations under a single parent run.
+    
+    This specialized callback manager is used with the `trace_as_chain_group` context
+    manager to group logically related operations (that aren't necessarily composed
+    in a single chain) under a common parent run in tracing systems. This enables
+    organizing complex workflows into hierarchical traces.
+    
+    Key Features:
+    - Maintains reference to parent_run_manager for automatic cleanup
+    - Tracks 'ended' state to prevent duplicate end events
+    - Overrides merge() to preserve parent_run_manager during configuration merging
+    
+    !!! note "Automatic Cleanup"
+        When exiting the `trace_as_chain_group` context, this manager automatically
+        calls `parent_run_manager.on_chain_end()` if not already ended, ensuring
+        the parent run is properly closed even if individual operations fail.
+    
+    !!! info "Use Case"
+        Useful when multiple independent chain invocations should be logically
+        grouped for analysis, such as parallel tool calls or multi-step workflows
+        that don't fit into a single chain composition.
+    
+    Example:
+        ```python
+        from langchain_core.callbacks.manager import trace_as_chain_group
+        
+        with trace_as_chain_group("data-processing", tags=["batch-1"]) as manager:
+            # All operations within this context share the same parent run
+            result1 = chain1.invoke(input1, {"callbacks": manager})
+            result2 = chain2.invoke(input2, {"callbacks": manager})
+            # Parent run automatically closed on context exit
+        ```
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:1630
+    """
 
     def __init__(
         self,
@@ -2122,19 +2537,61 @@ class AsyncCallbackManager(BaseCallbackManager):
         inheritable_metadata: dict[str, Any] | None = None,
         local_metadata: dict[str, Any] | None = None,
     ) -> AsyncCallbackManager:
-        """Configure the async callback manager.
+        """Configure the async callback manager with handlers, tags, and metadata propagation.
+        
+        This method creates a new async callback manager instance with the specified
+        handlers and configuration, properly managing the distinction between inheritable
+        and local attributes. This is the async equivalent of CallbackManager.configure(),
+        designed for use in async chain execution contexts.
 
         Args:
-            inheritable_callbacks: The inheritable callbacks.
-            local_callbacks: The local callbacks.
-            verbose: Whether to enable verbose mode.
-            inheritable_tags: The inheritable tags.
-            local_tags: The local tags.
-            inheritable_metadata: The inheritable metadata.
-            local_metadata: The local metadata.
+            inheritable_callbacks: Callback handlers that will be propagated to child
+                async callback managers. Can be a list of handlers or another
+                AsyncCallbackManager instance to copy configuration from.
+            local_callbacks: Callback handlers that apply only to this manager instance
+                and are not inherited by child managers. Can be a list of handlers or
+                another AsyncCallbackManager instance.
+            verbose: Whether to enable verbose mode, which adds StdOutCallbackHandler
+                for printing execution details to stdout in async contexts.
+            inheritable_tags: Tags that will be propagated to child async callback
+                managers, useful for hierarchical run organization in tracing systems.
+            local_tags: Tags that apply only to this manager instance and are not
+                inherited by child managers.
+            inheritable_metadata: Metadata dict that will be propagated to child
+                async callback managers, useful for passing context through async
+                execution chains.
+            local_metadata: Metadata dict that applies only to this manager instance
+                and is not inherited by child managers.
 
         Returns:
-            The configured async callback manager.
+            A configured AsyncCallbackManager instance with all handlers, tags, and
+            metadata properly registered and ready for use in async chain execution.
+            The manager will also include any handlers configured via environment
+            variables (e.g., LANGCHAIN_TRACING_V2 for LangSmith tracing).
+        
+        !!! note "Async Context Awareness"
+            This manager is designed for async contexts and will use `await` when
+            invoking async callback handler methods. Use `CallbackManager.configure()`
+            for synchronous contexts instead.
+        
+        Example:
+            ```python
+            from langchain_core.callbacks import AsyncCallbackManager
+            from langchain_core.callbacks.stdout import StdOutCallbackHandler
+            
+            # Create async manager with inheritable handler for nested chains
+            manager = AsyncCallbackManager.configure(
+                inheritable_callbacks=[StdOutCallbackHandler()],
+                inheritable_tags=["async-chain"],
+                verbose=True
+            )
+            
+            # Use in async chain execution
+            async def run_chain():
+                child_manager = await manager.on_chain_start({"name": "child"}, {})
+            ```
+        
+        Source: libs/core/langchain_core/callbacks/manager.py:2115
         """
         return _configure(
             cls,
@@ -2149,7 +2606,44 @@ class AsyncCallbackManager(BaseCallbackManager):
 
 
 class AsyncCallbackManagerForChainGroup(AsyncCallbackManager):
-    """Async callback manager for the chain group."""
+    """Async callback manager for grouping multiple async operations under a single parent run.
+    
+    This specialized async callback manager is used with the `atrace_as_chain_group`
+    context manager to group logically related async operations (that aren't necessarily
+    composed in a single chain) under a common parent run in tracing systems. This
+    enables organizing complex async workflows into hierarchical traces.
+    
+    Key Features:
+    - Maintains reference to parent_run_manager for automatic async cleanup
+    - Tracks 'ended' state to prevent duplicate end events
+    - Overrides merge() to preserve parent_run_manager during configuration merging
+    
+    !!! note "Automatic Async Cleanup"
+        When exiting the `atrace_as_chain_group` async context, this manager
+        automatically awaits `parent_run_manager.on_chain_end()` if not already
+        ended, ensuring the parent run is properly closed even if individual
+        operations fail.
+    
+    !!! info "Use Case"
+        Useful when multiple independent async chain invocations should be logically
+        grouped for analysis, such as concurrent tool calls or multi-step async
+        workflows that don't fit into a single chain composition.
+    
+    Example:
+        ```python
+        from langchain_core.callbacks.manager import atrace_as_chain_group
+        
+        async with atrace_as_chain_group(
+            "async-processing", tags=["batch-1"]
+        ) as manager:
+            # All async operations share the same parent run
+            result1 = await chain1.ainvoke(input1, {"callbacks": manager})
+            result2 = await chain2.ainvoke(input2, {"callbacks": manager})
+            # Parent run automatically closed on context exit
+        ```
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:2151
+    """
 
     def __init__(
         self,
@@ -2293,23 +2787,76 @@ def _configure(
     *,
     verbose: bool = False,
 ) -> T:
-    """Configure the callback manager.
+    """Central configuration logic for creating callback manager instances.
+    
+    This function is the core implementation shared by CallbackManager.configure()
+    and AsyncCallbackManager.configure(). It handles complex configuration scenarios
+    including:
+    - Inheriting handlers/tags/metadata from parent managers
+    - Merging with LangSmith tracing context (parent runs, metadata, tags)
+    - Auto-enabling handlers based on environment variables
+    - Resolving conflicts between external tracing context and inherited context
+    
+    Configuration Flow:
+    1. Retrieve LangSmith tracing context (parent run, tags, metadata)
+    2. Create base manager with parent_run_id from tracing context
+    3. Configure inheritable and local callbacks/handlers
+    4. Merge inheritable and local tags
+    5. Merge inheritable and local metadata
+    6. Apply tracing context metadata and tags
+    7. Auto-enable handlers based on environment variables:
+       - LANGCHAIN_TRACING_V2 → LangChainTracer
+       - LANGCHAIN_DEBUG → ConsoleCallbackHandler
+       - verbose=True → StdOutCallbackHandler
+    8. Configure custom hooks from _configure_hooks registry
 
     Args:
-        callback_manager_cls: The callback manager class.
-        inheritable_callbacks: The inheritable callbacks.
-        local_callbacks: The local callbacks.
-        inheritable_tags: The inheritable tags.
-        local_tags: The local tags.
-        inheritable_metadata: The inheritable metadata.
-        local_metadata: The local metadata.
-        verbose: Whether to enable verbose mode.
+        callback_manager_cls: The callback manager class to instantiate (either
+            CallbackManager or AsyncCallbackManager).
+        inheritable_callbacks: Callback handlers that will be propagated to child
+            managers. Can be a list of handlers or another callback manager instance.
+        local_callbacks: Callback handlers that apply only to this manager instance.
+            Can be a list of handlers or another callback manager instance.
+        inheritable_tags: Tags that will be propagated to child callback managers.
+        local_tags: Tags that apply only to this manager instance.
+        inheritable_metadata: Metadata dict that will be propagated to child managers.
+        local_metadata: Metadata dict that applies only to this manager instance.
+        verbose: If True, adds StdOutCallbackHandler for printing execution details.
 
     Raises:
-        RuntimeError: If `LANGCHAIN_TRACING` is set but `LANGCHAIN_TRACING_V2` is not.
+        RuntimeError: If deprecated `LANGCHAIN_TRACING` environment variable is set
+            without `LANGCHAIN_TRACING_V2`. The V1 tracer is no longer supported.
 
     Returns:
-        The configured callback manager.
+        A fully configured callback manager instance of type callback_manager_cls,
+        with all handlers, tags, metadata, and environment-based configurations applied.
+    
+    !!! note "Parent Run Context Resolution"
+        When inheritable_callbacks contains a parent_run_id AND a LangSmith tracing
+        context exists with a different parent, this function intelligently resolves
+        which parent to use by checking if the LC parent is already reflected in the
+        run tree's dotted_order. This prevents duplicate parent tracking.
+    
+    !!! warning "Handler Deduplication"
+        The function ensures handlers are not added multiple times by checking for
+        existing instances of each handler class before adding environment-configured
+        handlers. This prevents duplicate logging and tracing.
+    
+    Example:
+        ```python
+        from langchain_core.callbacks.manager import CallbackManager, _configure
+        
+        # Create manager with tracing enabled via environment
+        # Assumes LANGCHAIN_TRACING_V2=true is set
+        manager = _configure(
+            CallbackManager,
+            inheritable_tags=["experiment-1"],
+            verbose=True
+        )
+        # Result: manager with LangChainTracer + StdOutCallbackHandler
+        ```
+    
+    Source: libs/core/langchain_core/callbacks/manager.py:2285
     """
     tracing_context = get_tracing_context()
     tracing_metadata = tracing_context["metadata"]
