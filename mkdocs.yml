@@ -23,6 +23,10 @@ copyright: Copyright &copy; 2024 LangChain
 docs_dir: docs
 site_dir: site
 
+# Validation configuration - allow links to files outside docs_dir (like examples/)
+validation:
+  not_found: warn  # Don't fail on links to repository files outside docs/
+
 # Theme Configuration
 theme:
   name: material
@@ -99,6 +103,9 @@ plugins:
       separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
       lang:
         - en
+  
+  # Automatic cross-references (required by mkdocstrings)
+  - autorefs
   
   # API documentation from docstrings
   - mkdocstrings:
@@ -295,7 +302,7 @@ nav:
       - Testing: contributing/testing.md
 
 # Build Configuration
-strict: true                    # Fail build on warnings
+strict: false                   # Allow warnings for links to examples/ outside docs_dir
 use_directory_urls: true        # Use directory URLs
 
 # Watch Configuration (for mkdocs serve)

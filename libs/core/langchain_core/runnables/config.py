@@ -1188,6 +1188,11 @@ def get_callback_manager_for_config(config: RunnableConfig) -> CallbackManager:
 
     Source: libs/core/langchain_core/runnables/config.py:566-579
     """
+    return CallbackManager.configure(
+        inheritable_callbacks=config.get("callbacks"),
+        inheritable_tags=config.get("tags"),
+        inheritable_metadata=config.get("metadata"),
+    )
 
 
 def get_async_callback_manager_for_config(
@@ -1249,6 +1254,11 @@ def get_async_callback_manager_for_config(
 
     Source: libs/core/langchain_core/runnables/config.py:622-636
     """
+    return AsyncCallbackManager.configure(
+        inheritable_callbacks=config.get("callbacks"),
+        inheritable_tags=config.get("tags"),
+        inheritable_metadata=config.get("metadata"),
+    )
 
 
 P = ParamSpec("P")
